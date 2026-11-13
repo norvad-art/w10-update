@@ -4,13 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       iso_url:
-        description: 'Buzzheavier URL for base Windows 10 ISO'
+        description: 'Buzzheavier URL or direct .iso URL for base Windows 10 ISO'
         required: true
         default: 'https://buzzheavier.com'
       iso_sha256:
         description: 'Expected SHA-256 checksum of base ISO (leave blank to skip check)'
         required: false
         default: 'a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160'
+      wim_index:
+        description: 'WIM Edition Index to keep (2 = IoT Enterprise LTSC, 1 = Enterprise LTSC, 0 = Keep All)'
+        required: true
+        default: '2'
       lcu_url:
         description: 'Direct .msu download URL for Cumulative Update (from MS Update Catalog)'
         required: true
@@ -95,6 +99,7 @@ jobs:
             'ResetBase'     = '0'
             'LCUwinre'      = '0'
             'WinRE'         = '0'
+            'SkipEdge'      = '1'
             '_CabDir'       = 'D:\work\temp'
             'MountDir'      = 'D:\work\mount'
             'WinreMount'    = 'D:\work\mountre'
@@ -116,34 +121,52 @@ jobs:
           Write-Host "=== Active W10UI.ini Configuration ==="
           Get-Content -Path $iniPath
 
-      - name: Download and verify base ISO from Buzzheavier
+      - name: Download, verify, extract, and trim base ISO
         shell: pwsh
         run: |
-          $pageUrl = "${{ github.event.inputs.iso_url }}".TrimEnd('/')
-          $dlEndpoint = "$pageUrl/download"
+          $inputUrl = "${{ github.event.inputs.iso_url }}".Trim().TrimEnd('/')
           $isoPath = "D:\work\base.iso"
+          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          Write-Host "Resolving direct Buzzheavier link from $dlEndpoint ..."
-          $headers = @{
-            "HX-Request"     = "true"
-            "HX-Current-URL" = $pageUrl
-            "Referer"        = $pageUrl
-            "User-Agent"     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+          if ($inputUrl -match "buzzheavier\.com") {
+            $cookieFile = "D:\work\bh_cookies.txt"
+            $dlEndpoint = "$inputUrl/download"
+
+            Write-Host "Fetching Buzzheavier session from $inputUrl ..."
+            curl.exe -s -L -c $cookieFile -A "$ua" "$inputUrl" -o NUL
+
+            Write-Host "Resolving direct Buzzheavier link via GET $dlEndpoint ..."
+            $rawHeaders = curl.exe -s -i -X GET -b $cookieFile -c $cookieFile `
+              -A "$ua" `
+              -H "HX-Request: true" `
+              -H "HX-Current-URL: $inputUrl" `
+              -H "Referer: $inputUrl" `
+              -H "Accept: */*" `
+              "$dlEndpoint"
+
+            $redirectLine = ($rawHeaders -split "`r?`n") | Where-Object { $_ -match "^(?i)hx-redirect:" } | Select-Object -First 1
+            if (-not $redirectLine) {
+              Write-Host "=== Raw Response Headers ==="
+              Write-Host ($rawHeaders | Select-Object -First 30)
+              throw "Failed to resolve HX-Redirect from Buzzheavier. If Buzzheavier blocks runner IPs, use a direct .iso URL instead."
+            }
+
+            $directUrl = ($redirectLine -replace "^(?i)hx-redirect:\s*", "").Trim()
+            if ($directUrl.StartsWith("/")) {
+              $directUrl = "https://buzzheavier.com$directUrl"
+            }
+
+            Write-Host "Downloading base ISO from resolved Buzzheavier URL..."
+            curl.exe -L --fail --retry 3 -b $cookieFile -A "$ua" -H "Referer: $inputUrl" -o $isoPath "$directUrl"
+            Remove-Item -Path $cookieFile -Force -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "Downloading base ISO directly from $inputUrl ..."
+            curl.exe -L --fail --retry 3 -A "$ua" -o $isoPath "$inputUrl"
           }
 
-          $resp = Invoke-WebRequest -Uri $dlEndpoint -Method Head -Headers $headers -MaximumRedirection 0 -ErrorAction SilentlyContinue
-          $directUrl = $resp.Headers["HX-Redirect"]
-
-          if (-not $directUrl) {
-            throw "Failed to resolve HX-Redirect URL from Buzzheavier. Check if the link is still active."
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $isoPath)) {
+            throw "ISO download failed."
           }
-          if ($directUrl.StartsWith("/")) {
-            $directUrl = "https://buzzheavier.com$directUrl"
-          }
-
-          Write-Host "Downloading base ISO to $isoPath ..."
-          curl.exe -L --fail --retry 3 -H "Referer: $pageUrl" -o $isoPath "$directUrl"
-          if ($LASTEXITCODE -ne 0) { throw "ISO download failed." }
 
           $expectedHash = "${{ github.event.inputs.iso_sha256 }}".Trim().ToLower()
           if ($expectedHash) {
@@ -161,6 +184,31 @@ jobs:
 
           Write-Host "Deleting base.iso to reclaim disk space..."
           Remove-Item -Path $isoPath -Force
+
+          # Clear ReadOnly attributes from extracted ISO files
+          Get-ChildItem -Path "D:\work\iso" -Recurse -Force | ForEach-Object {
+            if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+              $_.Attributes = $_.Attributes -bxor [System.IO.FileAttributes]::ReadOnly
+            }
+          }
+
+          $keepIndex = "${{ github.event.inputs.wim_index }}".Trim()
+          $wimPath = "D:\work\iso\sources\install.wim"
+          $wimlib = Join-Path $env:GITHUB_WORKSPACE "W10UI\bin\wimlib-imagex.exe"
+
+          if ($keepIndex -ne "0" -and (Test-Path $wimPath)) {
+            Write-Host "=== Original install.wim Info ==="
+            & $wimlib info $wimPath
+
+            Write-Host "Trimming install.wim to single Index $keepIndex ..."
+            $trimmedWim = "D:\work\install_trimmed.wim"
+            & $wimlib export $wimPath $keepIndex $trimmedWim
+            if ($LASTEXITCODE -ne 0) { throw "wimlib export failed for index $keepIndex." }
+
+            Move-Item -Path $trimmedWim -Destination $wimPath -Force
+            Write-Host "=== Trimmed install.wim Info ==="
+            & $wimlib info $wimPath
+          }
 
       - name: Download Windows Update packages
         shell: pwsh
