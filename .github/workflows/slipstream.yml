@@ -6,7 +6,7 @@ on:
       iso_url:
         description: 'Buzzheavier URL or direct .iso URL for base Windows 10 ISO'
         required: true
-        default: 'https://buzzheavier.com/yhggy3l1e5oq'
+        default: 'https://buzzheavier.com'
       iso_sha256:
         description: 'Expected SHA-256 checksum of base ISO (leave blank to skip check)'
         required: false
@@ -33,39 +33,6 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Free up disk space on runner
-        shell: pwsh
-        run: |
-          Write-Host "=== Free space BEFORE cleanup ==="
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
-
-          $dirsToRemove = @(
-            "C:\Android",
-            "C:\Program Files (x86)\Android",
-            "C:\Program Files\Java",
-            "C:\Program Files\Eclipse Adoptium",
-            "C:\Program Files\dotnet",
-            "C:\hostedtoolcache\windows\Java*",
-            "C:\hostedtoolcache\windows\Python",
-            "C:\hostedtoolcache\windows\Ruby",
-            "C:\hostedtoolcache\windows\go",
-            "C:\hostedtoolcache\windows\node",
-            "C:\Users\runneradmin\.rustup",
-            "C:\Users\runneradmin\.cargo",
-            "C:\ProgramData\chocolatey\lib",
-            "C:\msys64"
-          )
-
-          foreach ($path in $dirsToRemove) {
-            if (Test-Path $path) {
-              Write-Host "Removing $path ..."
-              Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
-            }
-          }
-
-          Write-Host "=== Free space AFTER cleanup ==="
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
-
       - name: Checkout repository (W10UI folder)
         uses: actions/checkout@v4
 
@@ -121,7 +88,7 @@ jobs:
           Write-Host "=== Active W10UI.ini Configuration ==="
           Get-Content -Path $iniPath
 
-      - name: Download, verify, extract, and trim base ISO
+      - name: Download and verify base ISO
         shell: pwsh
         run: |
           $inputUrl = "${{ github.event.inputs.iso_url }}".Trim().TrimEnd('/')
@@ -178,6 +145,70 @@ jobs:
             Write-Host "SHA-256 verified: $actualHash"
           }
 
+      - name: Download Windows Update packages
+        shell: pwsh
+        run: |
+          $lcuUrl = "${{ github.event.inputs.lcu_url }}".Trim()
+          $lcuFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$lcuUrl).LocalPath))
+          if (-not $lcuFile.EndsWith(".msu") -and -not $lcuFile.EndsWith(".cab")) {
+            $lcuFile = "D:\work\updates\lcu_update.msu"
+          }
+
+          Write-Host "Downloading LCU from $lcuUrl ..."
+          curl.exe -L --fail --retry 3 -o $lcuFile "$lcuUrl"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download LCU update." }
+
+          $dotnetUrl = "${{ github.event.inputs.dotnet_url }}".Trim()
+          if ($dotnetUrl) {
+            $dotnetFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$dotnetUrl).LocalPath))
+            if (-not $dotnetFile.EndsWith(".msu") -and -not $dotnetFile.EndsWith(".cab")) {
+              $dotnetFile = "D:\work\updates\dotnet_update.msu"
+            }
+            Write-Host "Downloading .NET update from $dotnetUrl ..."
+            curl.exe -L --fail --retry 3 -o $dotnetFile "$dotnetUrl"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to download .NET update." }
+          }
+
+          Get-ChildItem "D:\work\updates"
+
+      - name: Free up disk space on runner
+        shell: pwsh
+        run: |
+          Write-Host "=== Free space BEFORE cleanup ==="
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
+
+          $dirsToRemove = @(
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "C:\Program Files\Java",
+            "C:\Program Files\Eclipse Adoptium",
+            "C:\Program Files\dotnet",
+            "C:\hostedtoolcache\windows\Java*",
+            "C:\hostedtoolcache\windows\Python",
+            "C:\hostedtoolcache\windows\Ruby",
+            "C:\hostedtoolcache\windows\go",
+            "C:\hostedtoolcache\windows\node",
+            "C:\Users\runneradmin\.rustup",
+            "C:\Users\runneradmin\.cargo",
+            "C:\ProgramData\chocolatey\lib",
+            "C:\msys64"
+          )
+
+          foreach ($path in $dirsToRemove) {
+            if (Test-Path $path) {
+              Write-Host "Removing $path ..."
+              Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          Write-Host "=== Free space AFTER cleanup ==="
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
+
+      - name: Extract and trim base ISO
+        shell: pwsh
+        run: |
+          $isoPath = "D:\work\base.iso"
+
           Write-Host "Extracting ISO to D:\work\iso ..."
           7z x $isoPath -o"D:\work\iso" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z extraction failed." }
@@ -209,32 +240,6 @@ jobs:
             Write-Host "=== Trimmed install.wim Info ==="
             & $wimlib info $wimPath
           }
-
-      - name: Download Windows Update packages
-        shell: pwsh
-        run: |
-          $lcuUrl = "${{ github.event.inputs.lcu_url }}".Trim()
-          $lcuFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$lcuUrl).LocalPath))
-          if (-not $lcuFile.EndsWith(".msu") -and -not $lcuFile.EndsWith(".cab")) {
-            $lcuFile = "D:\work\updates\lcu_update.msu"
-          }
-
-          Write-Host "Downloading LCU from $lcuUrl ..."
-          curl.exe -L --fail --retry 3 -o $lcuFile "$lcuUrl"
-          if ($LASTEXITCODE -ne 0) { throw "Failed to download LCU update." }
-
-          $dotnetUrl = "${{ github.event.inputs.dotnet_url }}".Trim()
-          if ($dotnetUrl) {
-            $dotnetFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$dotnetUrl).LocalPath))
-            if (-not $dotnetFile.EndsWith(".msu") -and -not $dotnetFile.EndsWith(".cab")) {
-              $dotnetFile = "D:\work\updates\dotnet_update.msu"
-            }
-            Write-Host "Downloading .NET update from $dotnetUrl ..."
-            curl.exe -L --fail --retry 3 -o $dotnetFile "$dotnetUrl"
-            if ($LASTEXITCODE -ne 0) { throw "Failed to download .NET update." }
-          }
-
-          Get-ChildItem "D:\work\updates"
 
       - name: Run W10UI slipstream
         shell: cmd
