@@ -6,7 +6,7 @@ on:
       iso_url:
         description: 'Buzzheavier URL or direct .iso URL for base Windows 10 ISO'
         required: true
-        default: 'https://buzzheavier.com'
+        default: 'https://buzzheavier.com/yhggy3l1e5oq'
       iso_sha256:
         description: 'Expected SHA-256 checksum of base ISO (leave blank to skip check)'
         required: false
@@ -128,7 +128,7 @@ jobs:
           $isoPath = "D:\work\base.iso"
           $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          if ($inputUrl -match "buzzheavier\.com") {
+          if ($inputUrl -match "buzzif ($inputUrl -match "^https?://(www\.)?buzzheavier\.com/") {heavier\.com") {
             $cookieFile = "D:\work\bh_cookies.txt"
             $dlEndpoint = "$inputUrl/download"
 
