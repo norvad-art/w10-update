@@ -128,7 +128,7 @@ jobs:
           $isoPath = "D:\work\base.iso"
           $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          if ($inputUrl -match "buzzif ($inputUrl -match "^https?://(www\.)?buzzheavier\.com/") {heavier\.com") {
+          if ($inputUrl -match "^https?://(www\.)?buzzheavier\.com/") {
             $cookieFile = "D:\work\bh_cookies.txt"
             $dlEndpoint = "$inputUrl/download"
 
