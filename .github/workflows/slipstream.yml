@@ -4,17 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       iso_url:
-        description: 'Buzzheavier URL or direct .iso URL for base Windows 10 ISO'
+        description: 'Direct .iso URL or Buzzheavier URL for base Windows 10 ISO'
         required: true
-        default: 'https://buzzheavier.com'
+        default: ''
       iso_sha256:
         description: 'Expected SHA-256 checksum of base ISO (leave blank to skip check)'
         required: false
-        default: 'a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160'
+        default: ''
       wim_index:
-        description: 'WIM Edition Index to keep (2 = IoT Enterprise LTSC, 1 = Enterprise LTSC, 0 = Keep All)'
+        description: 'WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All)'
         required: true
-        default: '2'
+        default: '1'
+      convert_to_iot:
+        description: 'Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped if native IoT ISO SHA matches)'
+        type: choice
+        required: true
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
       lcu_url:
         description: 'Direct .msu download URL for Cumulative Update (from MS Update Catalog)'
         required: true
@@ -137,14 +145,17 @@ jobs:
             throw "ISO download failed."
           }
 
+          Write-Host "Calculating SHA-256 checksum..."
+          $actualHash = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Downloaded ISO SHA-256: $actualHash"
+          "ACTUAL_ISO_SHA256=$actualHash" >> $env:GITHUB_ENV
+
           $expectedHash = "${{ github.event.inputs.iso_sha256 }}".Trim().ToLower()
           if ($expectedHash) {
-            Write-Host "Verifying SHA-256 checksum..."
-            $actualHash = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
             if ($actualHash -ne $expectedHash) {
               throw "SHA-256 mismatch! Expected: $expectedHash | Actual: $actualHash"
             }
-            Write-Host "SHA-256 verified: $actualHash"
+            Write-Host "SHA-256 verified against expected input."
           }
 
       - name: Download Windows Update packages
@@ -206,7 +217,7 @@ jobs:
           Write-Host "=== Free space AFTER cleanup ==="
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
 
-      - name: Extract and trim base ISO
+      - name: Extract, trim, and convert base ISO to IoT LTSC
         shell: pwsh
         run: |
           $isoPath = "D:\work\base.iso"
@@ -241,6 +252,40 @@ jobs:
             Move-Item -Path $trimmedWim -Destination $wimPath -Force
             Write-Host "=== Trimmed install.wim Info ==="
             & $wimlib info $wimPath
+          }
+
+          $convertToIoT = "${{ github.event.inputs.convert_to_iot }}".Trim()
+          $nativeIotSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
+
+          if ($convertToIoT -eq "true" -and (Test-Path $wimPath)) {
+            if ($env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
+              Write-Host "ISO matches native IoT LTSC SHA-256 ($nativeIotSha). Skipping edition conversion."
+            } else {
+              $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"$wimPath" /Index:1
+              if ($wimInfo -match "Edition ID\s*:\s*IoTEnterpriseS") {
+                Write-Host "Image is already IoTEnterpriseS. Skipping edition conversion."
+              } else {
+                Write-Host "Mounting install.wim to convert edition to IoTEnterpriseS..."
+                dism.exe /English /Mount-Wim /WimFile:"$wimPath" /Index:1 /MountDir:"D:\work\mount"
+                if ($LASTEXITCODE -ne 0) { throw "DISM Mount-Wim failed." }
+
+                try {
+                  Write-Host "Setting Edition to IoTEnterpriseS..."
+                  dism.exe /English /Image:"D:\work\mount" /Set-Edition:IoTEnterpriseS
+                  if ($LASTEXITCODE -ne 0) { throw "DISM Set-Edition:IoTEnterpriseS failed." }
+
+                  Write-Host "Committing and unmounting install.wim..."
+                  dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Commit
+                  if ($LASTEXITCODE -ne 0) { throw "DISM Unmount-Wim /Commit failed." }
+                } catch {
+                  dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Discard | Out-Null
+                  throw $_
+                }
+
+                Write-Host "=== Final install.wim Info After IoT Conversion ==="
+                & $wimlib info $wimPath
+              }
+            }
           }
 
       - name: Run W10UI slipstream
