@@ -127,8 +127,10 @@ jobs:
             curl.exe -L --fail --retry 3 -b $cookieFile -A "$ua" -H "Referer: $inputUrl" -o $isoPath "$directUrl"
             Remove-Item -Path $cookieFile -Force -ErrorAction SilentlyContinue
           } else {
-            Write-Host "Downloading base ISO directly from $inputUrl ..."
-            curl.exe -L --fail --retry 3 -A "$ua" -o $isoPath "$inputUrl"
+            $uri = [System.Uri]$inputUrl
+            $refererUrl = "$($uri.Scheme)://$($uri.Host)/"
+            Write-Host "Downloading base ISO directly from $inputUrl (Referer: $refererUrl) ..."
+            curl.exe -L --fail --retry 3 -A "$ua" -H "Referer: $refererUrl" -o $isoPath "$inputUrl"
           }
 
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $isoPath)) {
@@ -265,6 +267,9 @@ jobs:
           Write-Host "Upload response: $response"
           $json = $response | ConvertFrom-Json
           $fileId = $json.data.id
+          if (-not $fileId) {
+            throw "Could not parse file ID from Buzzheavier response: $response"
+          }
           $downloadLink = "https://buzzheavier.com"
 
           Write-Host "=========================================="
