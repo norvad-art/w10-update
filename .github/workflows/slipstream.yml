@@ -63,6 +63,12 @@ jobs:
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
           }
 
+          Write-Host "Installing aria2..."
+          choco install aria2 -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install aria2."
+          }
+
           $sourceW10uiDir = Join-Path $env:GITHUB_WORKSPACE "W10UI"
           $w10uiDir = "D:\work\W10UI"
 
@@ -91,56 +97,58 @@ jobs:
       - name: Download and verify base ISO to D
         shell: pwsh
         run: |
-          $inputUrl = "${{ github.event.inputs.iso_url }}".Trim().TrimEnd('/')
+          $inputUrl = "${{ github.event.inputs.iso_url }}".Trim()
           $isoPath = "D:\work\base.iso"
           $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          if ($inputUrl -match "^https?://(www\.)?buzzheavier\.com/") {
-            $cookieFile = "D:\work\bh_cookies.txt"
-            $dlEndpoint = "$inputUrl/download"
+          $uri = [System.Uri]$inputUrl
+          $refererUrl = "$($uri.Scheme)://$($uri.Host)/"
 
-            Write-Host "Fetching Buzzheavier session from $inputUrl ..."
-            curl.exe -s -L -c $cookieFile -A "$ua" "$inputUrl" -o NUL
+          if ($inputUrl -match "\.torrent(\?.*)?$") {
+            Write-Host "Downloading torrent via aria2c (P2P + Web Seeds)..."
+            $torrentTmpDir = "D:\work\torrent_tmp"
+            New-Item -ItemType Directory -Path $torrentTmpDir -Force | Out-Null
 
-            Write-Host "Resolving direct Buzzheavier link via GET $dlEndpoint ..."
-            $rawHeaders = curl.exe -s -i -X GET -b $cookieFile -c $cookieFile `
-              -A "$ua" `
-              -H "HX-Request: true" `
-              -H "HX-Current-URL: $inputUrl" `
-              -H "Referer: $inputUrl" `
-              -H "Accept: */*" `
-              "$dlEndpoint"
+            aria2c --dir="$torrentTmpDir" `
+              --seed-time=0 `
+              --bt-max-peers=100 `
+              --user-agent="$ua" `
+              --summary-interval=15 `
+              "$inputUrl"
 
-            $redirectLine = ($rawHeaders -split "`r?`n") |
-              Where-Object { $_ -match "^(?i)hx-redirect:" } |
+            if ($LASTEXITCODE -ne 0) {
+              throw "aria2c torrent download failed."
+            }
+
+            $downloadedIso = Get-ChildItem -Path $torrentTmpDir -Filter "*.iso" -Recurse |
+              Sort-Object Length -Descending |
               Select-Object -First 1
 
-            if (-not $redirectLine) {
-              Write-Host "=== Raw Response Headers ==="
-              Write-Host ($rawHeaders | Select-Object -First 30)
-              throw "Could not resolve the Buzzheavier download link. Try a direct .iso URL."
+            if (-not $downloadedIso) {
+              throw "No .iso file was found inside the downloaded torrent."
             }
 
-            $directUrl = ($redirectLine -replace "^(?i)hx-redirect:\s*", "").Trim()
-            if ($directUrl.StartsWith("/")) {
-              $directUrl = "https://buzzheavier.com$directUrl"
-            }
+            Move-Item -Path $downloadedIso.FullName -Destination $isoPath -Force
+            Remove-Item -Path $torrentTmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-            Write-Host "Downloading base ISO to $isoPath ..."
-            curl.exe -L --fail --retry 3 -b $cookieFile -A "$ua" `
-              -H "Referer: $inputUrl" -o $isoPath "$directUrl"
-
-            Remove-Item -Path $cookieFile -Force -ErrorAction SilentlyContinue
           } else {
-            $uri = [System.Uri]$inputUrl
-            $refererUrl = "$($uri.Scheme)://$($uri.Host)/"
+            Write-Host "Downloading base ISO to $isoPath via multi-threaded aria2c..."
+            aria2c --dir="D:\work" `
+              --out="base.iso" `
+              -x 16 -s 16 -k 1M `
+              --max-tries=5 `
+              --retry-wait=3 `
+              --user-agent="$ua" `
+              --referer="$refererUrl" `
+              --summary-interval=15 `
+              "$inputUrl"
 
-            Write-Host "Downloading base ISO to $isoPath ..."
-            curl.exe -L --fail --retry 3 --continue-at - -A "$ua" `
-              -H "Referer: $refererUrl" -o $isoPath "$inputUrl"
+            if ($LASTEXITCODE -ne 0) {
+              throw "aria2c HTTP download failed."
+            }
           }
 
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $isoPath)) {
+          if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."
           }
 
@@ -157,7 +165,8 @@ jobs:
             Write-Host "SHA-256 verified against expected input."
           }
 
-      - name: Download Windows Update packages to C
+
+      - name: Download Windows Update packages to D
         shell: pwsh
         run: |
           $updatesDir = "D:\work\updates"
