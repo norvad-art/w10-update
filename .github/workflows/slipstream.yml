@@ -309,14 +309,17 @@ jobs:
           }
 
           Move-Item -Path $compressedWim -Destination $wimPath -Force
-
           Write-Host "Building bootable ISO with oscdimg.exe..."
           $oscdimg = Get-ChildItem -Path "D:\work\W10UI" -Filter "oscdimg.exe" -Recurse | Select-Object -First 1
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
           $outIso = "D:\work\out\$cleanName.iso"
 
+          $etfsboot = "D:\work\iso\boot\etfsboot.com"
+          $efisys = "D:\work\iso\efi\microsoft\boot\efisys.bin"
+          $bootData = "2#p0,e,b$etfsboot#pEF,e,b$efisys"
+
           & $oscdimg.FullName -m -o -u2 -udfver102 `
-            -bootdata:2#p0,e,b"D:\work\iso\boot\etfsboot.com"#pEF,e,b"D:\work\iso\efi\microsoft\boot\efisys.bin" `
+            "-bootdata:$bootData" `
             "D:\work\iso" "$outIso"
 
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outIso)) {
