@@ -33,7 +33,7 @@ on:
       output_name:
         description: Output ISO filename (without .iso)
         required: true
-        default: Win10_IoT_LTSC_2021_x64_Updated
+        default: W10_IoT_LTSC_2021_x64_Updated
 
 jobs:
   build-iso:
@@ -48,14 +48,14 @@ jobs:
         shell: pwsh
         run: |
           $workDirs = @(
-            "C:\work",
-            "C:\work\iso",
-            "C:\work\updates",
-            "C:\work\temp",
-            "C:\work\mount",
-            "C:\work\mountre",
-            "C:\work\out",
-            "C:\work\W10UI",
+            "D:\work",
+            "D:\work\iso",
+            "D:\work\updates",
+            "D:\work\temp",
+            "D:\work\mount",
+            "D:\work\mountre",
+            "D:\work\out",
+            "D:\work\W10UI",
             "D:\work"
           )
 
@@ -64,7 +64,7 @@ jobs:
           }
 
           $sourceW10uiDir = Join-Path $env:GITHUB_WORKSPACE "W10UI"
-          $w10uiDir = "C:\work\W10UI"
+          $w10uiDir = "D:\work\W10UI"
 
           if (-not (Test-Path (Join-Path $sourceW10uiDir "W10UI.ini"))) {
             throw "W10UI.ini not found in the repository's W10UI folder."
@@ -87,46 +87,6 @@ jobs:
           Write-Host "Using W10UI configuration: $iniPath"
           Write-Host "W10UI.ini will be used as checked into the repository; this workflow does not modify it."
 
-      - name: Free up space on C
-        shell: pwsh
-        run: |
-          Write-Host "=== Free space BEFORE cleanup ==="
-          Get-PSDrive -PSProvider FileSystem |
-            Select-Object Name,
-              @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}},
-              @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} |
-            Format-Table
-
-          $dirsToRemove = @(
-            "C:\Android",
-            "C:\Program Files (x86)\Android",
-            "C:\Program Files\Java",
-            "C:\Program Files\Eclipse Adoptium",
-            "C:\hostedtoolcache\windows\Java*",
-            "C:\hostedtoolcache\windows\Python",
-            "C:\hostedtoolcache\windows\Ruby",
-            "C:\hostedtoolcache\windows\go",
-            "C:\hostedtoolcache\windows\node",
-            "C:\Users\runneradmin\.rustup",
-            "C:\Users\runneradmin\.cargo",
-            "C:\ProgramData\chocolatey\lib",
-            "C:\msys64"
-          )
-
-          foreach ($path in $dirsToRemove) {
-            Get-Item -Path $path -ErrorAction SilentlyContinue |
-              ForEach-Object {
-                Write-Host "Removing $($_.FullName) ..."
-                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-              }
-          }
-
-          Write-Host "=== Free space AFTER cleanup ==="
-          Get-PSDrive -PSProvider FileSystem |
-            Select-Object Name,
-              @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}},
-              @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} |
-            Format-Table
 
       - name: Download and verify base ISO to D
         shell: pwsh
@@ -200,7 +160,7 @@ jobs:
       - name: Download Windows Update packages to C
         shell: pwsh
         run: |
-          $updatesDir = "C:\work\updates"
+          $updatesDir = "D:\work\updates"
           $lcuUrl = "${{ github.event.inputs.lcu_url }}".Trim()
           $lcuFile = Join-Path $updatesDir ([System.IO.Path]::GetFileName(([System.Uri]$lcuUrl).LocalPath))
 
@@ -237,7 +197,7 @@ jobs:
         shell: pwsh
         run: |
           $isoPath = "D:\work\base.iso"
-          $extractDir = "C:\work\iso"
+          $extractDir = "D:\work\iso"
 
           Write-Host "Extracting ISO from D: to $extractDir ..."
           7z x $isoPath -o"$extractDir" -y | Out-Null
@@ -276,7 +236,7 @@ jobs:
             }
 
             Write-Host "Trimming install.wim to index $keepIndex..."
-            $trimmedWim = "C:\work\install_trimmed.wim"
+            $trimmedWim = "D:\work\install_trimmed.wim"
             dism.exe /English /Export-Image /SourceImageFile:"$wimPath" `
               /SourceIndex:$keepIndex /DestinationImageFile:"$trimmedWim" `
               /Compress:max /CheckIntegrity
@@ -301,24 +261,24 @@ jobs:
             } else {
               Write-Host "Mounting install.wim to convert edition..."
               dism.exe /English /Mount-Wim /WimFile:"$wimPath" /Index:1 `
-                /MountDir:"C:\work\mount"
+                /MountDir:"D:\work\mount"
 
               if ($LASTEXITCODE -ne 0) {
                 throw "DISM Mount-Wim failed."
               }
 
               try {
-                dism.exe /English /Image:"C:\work\mount" /Set-Edition:IoTEnterpriseS
+                dism.exe /English /Image:"D:\work\mount" /Set-Edition:IoTEnterpriseS
                 if ($LASTEXITCODE -ne 0) {
                   throw "DISM Set-Edition:IoTEnterpriseS failed."
                 }
 
-                dism.exe /English /Unmount-Wim /MountDir:"C:\work\mount" /Commit
+                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Commit
                 if ($LASTEXITCODE -ne 0) {
                   throw "DISM Unmount-Wim /Commit failed."
                 }
               } catch {
-                dism.exe /English /Unmount-Wim /MountDir:"C:\work\mount" /Discard | Out-Null
+                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Discard | Out-Null
                 throw $_
               }
 
@@ -332,12 +292,12 @@ jobs:
       - name: Run W10UI slipstream, compress WIM, and build ISO
         shell: pwsh
         run: |
-          Push-Location "C:\work\W10UI"
+          Push-Location "D:\work\W10UI"
           cmd.exe /c "W10UI.cmd"
           Pop-Location
 
-          $wimPath = "C:\work\iso\sources\install.wim"
-          $compressedWim = "C:\work\install_max.wim"
+          $wimPath = "D:\work\iso\sources\install.wim"
+          $compressedWim = "D:\work\install_max.wim"
 
           Write-Host "Exporting install.wim with /Compress:max..."
           dism.exe /English /Export-Image /SourceImageFile:"$wimPath" `
@@ -351,13 +311,13 @@ jobs:
           Move-Item -Path $compressedWim -Destination $wimPath -Force
 
           Write-Host "Building bootable ISO with oscdimg.exe..."
-          $oscdimg = Get-ChildItem -Path "C:\work\W10UI" -Filter "oscdimg.exe" -Recurse | Select-Object -First 1
+          $oscdimg = Get-ChildItem -Path "D:\work\W10UI" -Filter "oscdimg.exe" -Recurse | Select-Object -First 1
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
-          $outIso = "C:\work\out\$cleanName.iso"
+          $outIso = "D:\work\out\$cleanName.iso"
 
           & $oscdimg.FullName -m -o -u2 -udfver102 `
-            -bootdata:2#p0,e,b"C:\work\iso\boot\etfsboot.com"#pEF,e,b"C:\work\iso\efi\microsoft\boot\efisys.bin" `
-            "C:\work\iso" "$outIso"
+            -bootdata:2#p0,e,b"D:\work\iso\boot\etfsboot.com"#pEF,e,b"D:\work\iso\efi\microsoft\boot\efisys.bin" `
+            "D:\work\iso" "$outIso"
 
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outIso)) {
             throw "oscdimg.exe failed to create the ISO."
@@ -367,9 +327,9 @@ jobs:
       - name: Upload updated ISO to Buzzheavier
         shell: pwsh
         run: |
-          $builtIso = Get-ChildItem -Path "C:\work\out\*.iso" | Select-Object -First 1
+          $builtIso = Get-ChildItem -Path "D:\work\out\*.iso" | Select-Object -First 1
           if (-not $builtIso) {
-            throw "No output ISO found in C:\work\out. Check the W10UI logs."
+            throw "No output ISO found in D:\work\out. Check the W10UI logs."
           }
 
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
