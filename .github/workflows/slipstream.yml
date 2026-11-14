@@ -301,7 +301,7 @@ jobs:
           }
 
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
-          $uploadUrl = "https://buzzheavier.com"
+          $uploadUrl = "https://w.buzzheavier.com/$cleanName.iso"
 
           Write-Host "Uploading $($builtIso.Name) ($([math]::Round($builtIso.Length/1GB, 2)) GB) to $uploadUrl..."
           $response = curl.exe -s --fail --retry 3 -T "$($builtIso.FullName)" "$uploadUrl"
@@ -313,7 +313,7 @@ jobs:
           if (-not $fileId) {
             throw "Could not parse file ID from Buzzheavier response: $response"
           }
-          $downloadLink = "https://buzzheavier.com"
+          $uploadUrl = "https://w.buzzheavier.com/$cleanName.iso"
 
           Write-Host "=========================================="
           Write-Host "SUCCESS! Download your updated ISO here:"
