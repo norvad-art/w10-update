@@ -329,11 +329,40 @@ jobs:
             Write-Host "Native IoT ISO detected; skipping edition conversion."
           }
 
-      - name: Run W10UI slipstream
-        shell: cmd
+      - name: Run W10UI slipstream, compress WIM, and build ISO
+        shell: pwsh
         run: |
-          cd /d "C:\work\W10UI"
-          call W10UI.cmd
+          Push-Location "C:\work\W10UI"
+          cmd.exe /c "W10UI.cmd"
+          Pop-Location
+
+          $wimPath = "C:\work\iso\sources\install.wim"
+          $compressedWim = "C:\work\install_max.wim"
+
+          Write-Host "Exporting install.wim with /Compress:max..."
+          dism.exe /English /Export-Image /SourceImageFile:"$wimPath" `
+            /All /DestinationImageFile:"$compressedWim" `
+            /Compress:max /CheckIntegrity
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Final DISM Export-Image failed."
+          }
+
+          Move-Item -Path $compressedWim -Destination $wimPath -Force
+
+          Write-Host "Building bootable ISO with oscdimg.exe..."
+          $oscdimg = Get-ChildItem -Path "C:\work\W10UI" -Filter "oscdimg.exe" -Recurse | Select-Object -First 1
+          $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
+          $outIso = "C:\work\out\$cleanName.iso"
+
+          & $oscdimg.FullName -m -o -u2 -udfver102 `
+            -bootdata:2#p0,e,b"C:\work\iso\boot\etfsboot.com"#pEF,e,b"C:\work\iso\efi\microsoft\boot\efisys.bin" `
+            "C:\work\iso" "$outIso"
+
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outIso)) {
+            throw "oscdimg.exe failed to create the ISO."
+          }
+
 
       - name: Upload updated ISO to Buzzheavier
         shell: pwsh
