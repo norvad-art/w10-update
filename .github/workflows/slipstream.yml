@@ -1,4 +1,5 @@
 name: Slipstream Windows 10 ISO with W10UI
+
 'on':
   workflow_dispatch:
     inputs:
@@ -11,11 +12,11 @@ name: Slipstream Windows 10 ISO with W10UI
         required: false
         default: ''
       wim_index:
-        description: WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All)
+        description: WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All; native IoT ISO SHA automatically keeps index 2)
         required: true
         default: '1'
       convert_to_iot:
-        description: Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped if native IoT ISO SHA matches)
+        description: Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped for native IoT ISO)
         type: choice
         required: true
         default: 'true'
@@ -33,13 +34,16 @@ name: Slipstream Windows 10 ISO with W10UI
         description: Output ISO filename (without .iso)
         required: true
         default: Win10_IoT_LTSC_2021_x64_Updated
+
 jobs:
   build-iso:
     runs-on: windows-latest
     timeout-minutes: 180
+
     steps:
       - name: Checkout repository (w10UI folder)
         uses: actions/checkout@v4
+
       - name: Prepare D:\work directories and configure W10UI.ini
         shell: pwsh
         run: |
@@ -71,7 +75,7 @@ jobs:
           }
 
           $ini = Get-Content -Path $iniPath -Raw
-          $updates = @{
+          $updates = [ordered]@{
             'Target'        = 'D:\work\iso'
             'Repo'          = 'D:\work\updates'
             'Net35'         = '0'
@@ -91,15 +95,25 @@ jobs:
           }
 
           foreach ($key in $updates.Keys) {
-            $pattern = "(?m)^($key\s*=).*$"
+            $pattern = "(?m)^($([regex]::Escape($key))\s*=).*$"
             if ($ini -match $pattern) {
-              $ini = [regex]::Replace($ini, $pattern, "`${1}$($updates[$key])")
+              $ini = [regex]::Replace(
+                $ini,
+                $pattern,
+                [System.Text.RegularExpressions.MatchEvaluator]{
+                  param($match)
+                  $match.Groups[1].Value + $updates[$key]
+                }
+              )
+            } else {
+              $ini += "`r`n$key=$($updates[$key])"
             }
           }
 
           Set-Content -Path $iniPath -Value $ini -Encoding ASCII
           Write-Host "=== Active W10UI.ini Configuration ==="
           Get-Content -Path $iniPath
+
       - name: Download and verify base ISO
         shell: pwsh
         run: |
@@ -123,7 +137,10 @@ jobs:
               -H "Accept: */*" `
               "$dlEndpoint"
 
-            $redirectLine = ($rawHeaders -split "`r?`n") | Where-Object { $_ -match "^(?i)hx-redirect:" } | Select-Object -First 1
+            $redirectLine = ($rawHeaders -split "`r?`n") |
+              Where-Object { $_ -match "^(?i)hx-redirect:" } |
+              Select-Object -First 1
+
             if (-not $redirectLine) {
               Write-Host "=== Raw Response Headers ==="
               Write-Host ($rawHeaders | Select-Object -First 30)
@@ -142,7 +159,7 @@ jobs:
             $uri = [System.Uri]$inputUrl
             $refererUrl = "$($uri.Scheme)://$($uri.Host)/"
             Write-Host "Downloading base ISO directly from $inputUrl (Referer: $refererUrl) ..."
-            curl.exe -L --fail --retry 3 -A "$ua" -H "Referer: $refererUrl" -o $isoPath "$inputUrl"
+            curl.exe -L --fail --retry 3 --continue-at - -A "$ua" -H "Referer: $refererUrl" -o $isoPath "$inputUrl"
           }
 
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $isoPath)) {
@@ -161,12 +178,14 @@ jobs:
             }
             Write-Host "SHA-256 verified against expected input."
           }
+
       - name: Download Windows Update packages
         shell: pwsh
         run: |
           $lcuUrl = "${{ github.event.inputs.lcu_url }}".Trim()
           $lcuFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$lcuUrl).LocalPath))
-          if (-not $lcuFile.EndsWith(".msu") -and -not $lcuFile.EndsWith(".cab")) {
+          if (-not $lcuFile.EndsWith(".msu", [System.StringComparison]::OrdinalIgnoreCase) -and
+              -not $lcuFile.EndsWith(".cab", [System.StringComparison]::OrdinalIgnoreCase)) {
             $lcuFile = "D:\work\updates\lcu_update.msu"
           }
 
@@ -177,20 +196,27 @@ jobs:
           $dotnetUrl = "${{ github.event.inputs.dotnet_url }}".Trim()
           if ($dotnetUrl) {
             $dotnetFile = Join-Path "D:\work\updates" ([System.IO.Path]::GetFileName(([System.Uri]$dotnetUrl).LocalPath))
-            if (-not $dotnetFile.EndsWith(".msu") -and -not $dotnetFile.EndsWith(".cab")) {
+            if (-not $dotnetFile.EndsWith(".msu", [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $dotnetFile.EndsWith(".cab", [System.StringComparison]::OrdinalIgnoreCase)) {
               $dotnetFile = "D:\work\updates\dotnet_update.msu"
             }
+
             Write-Host "Downloading .NET update from $dotnetUrl ..."
             curl.exe -L --fail --retry 3 -o $dotnetFile "$dotnetUrl"
             if ($LASTEXITCODE -ne 0) { throw "Failed to download .NET update." }
           }
 
           Get-ChildItem "D:\work\updates"
+
       - name: Free up disk space on runner
         shell: pwsh
         run: |
           Write-Host "=== Free space BEFORE cleanup ==="
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name,
+              @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}},
+              @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} |
+            Format-Table
 
           $dirsToRemove = @(
             "C:\Android",
@@ -217,7 +243,12 @@ jobs:
           }
 
           Write-Host "=== Free space AFTER cleanup ==="
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name,
+              @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}},
+              @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} |
+            Format-Table
+
       - name: Extract, trim, and convert base ISO to IoT LTSC
         shell: pwsh
         run: |
@@ -230,19 +261,31 @@ jobs:
           Write-Host "Deleting base.iso to reclaim disk space..."
           Remove-Item -Path $isoPath -Force
 
-          # Clear ReadOnly attributes from extracted ISO files
           Get-ChildItem -Path "D:\work\iso" -Recurse -Force | ForEach-Object {
             if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
               $_.Attributes = $_.Attributes -bxor [System.IO.FileAttributes]::ReadOnly
             }
           }
 
-          $keepIndex = "${{ github.event.inputs.wim_index }}".Trim()
+          $nativeIotSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
           $wimPath = "D:\work\iso\sources\install.wim"
 
-          if ($keepIndex -ne "0" -and (Test-Path $wimPath)) {
+          if (-not (Test-Path $wimPath)) {
+            throw "sources\install.wim not found. This workflow currently requires an ISO containing install.wim."
+          }
+
+          if ($env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
+            $keepIndex = "2"
+            Write-Host "Native IoT ISO SHA-256 matched; automatically keeping image index 2."
+          } else {
+            $keepIndex = "${{ github.event.inputs.wim_index }}".Trim()
+            Write-Host "Using requested WIM index: $keepIndex"
+          }
+
+          if ($keepIndex -ne "0") {
             Write-Host "=== Original install.wim Info ==="
             dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
+            if ($LASTEXITCODE -ne 0) { throw "Could not read install.wim information." }
 
             Write-Host "Trimming install.wim to single Index $keepIndex using DISM..."
             $trimmedWim = "D:\work\install_trimmed.wim"
@@ -255,43 +298,42 @@ jobs:
           }
 
           $convertToIoT = "${{ github.event.inputs.convert_to_iot }}".Trim()
-          $nativeIotSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
 
-          if ($convertToIoT -eq "true" -and (Test-Path $wimPath)) {
-            if ($env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
-              Write-Host "ISO matches native IoT LTSC SHA-256 ($nativeIotSha). Skipping edition conversion."
+          if ($convertToIoT -eq "true" -and $env:ACTUAL_ISO_SHA256 -ne $nativeIotSha) {
+            $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"$wimPath" /Index:1
+            if ($wimInfo -match "Edition ID\s*:\s*IoTEnterpriseS") {
+              Write-Host "Image is already IoTEnterpriseS. Skipping edition conversion."
             } else {
-              $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"$wimPath" /Index:1
-              if ($wimInfo -match "Edition ID\s*:\s*IoTEnterpriseS") {
-                Write-Host "Image is already IoTEnterpriseS. Skipping edition conversion."
-              } else {
-                Write-Host "Mounting install.wim to convert edition to IoTEnterpriseS..."
-                dism.exe /English /Mount-Wim /WimFile:"$wimPath" /Index:1 /MountDir:"D:\work\mount"
-                if ($LASTEXITCODE -ne 0) { throw "DISM Mount-Wim failed." }
+              Write-Host "Mounting install.wim to convert edition to IoTEnterpriseS..."
+              dism.exe /English /Mount-Wim /WimFile:"$wimPath" /Index:1 /MountDir:"D:\work\mount"
+              if ($LASTEXITCODE -ne 0) { throw "DISM Mount-Wim failed." }
 
-                try {
-                  Write-Host "Setting Edition to IoTEnterpriseS..."
-                  dism.exe /English /Image:"D:\work\mount" /Set-Edition:IoTEnterpriseS
-                  if ($LASTEXITCODE -ne 0) { throw "DISM Set-Edition:IoTEnterpriseS failed." }
+              try {
+                Write-Host "Setting Edition to IoTEnterpriseS..."
+                dism.exe /English /Image:"D:\work\mount" /Set-Edition:IoTEnterpriseS
+                if ($LASTEXITCODE -ne 0) { throw "DISM Set-Edition:IoTEnterpriseS failed." }
 
-                  Write-Host "Committing and unmounting install.wim..."
-                  dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Commit
-                  if ($LASTEXITCODE -ne 0) { throw "DISM Unmount-Wim /Commit failed." }
-                } catch {
-                  dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Discard | Out-Null
-                  throw $_
-                }
-
-                Write-Host "=== Final install.wim Info After IoT Conversion ==="
-                dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
+                Write-Host "Committing and unmounting install.wim..."
+                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Commit
+                if ($LASTEXITCODE -ne 0) { throw "DISM Unmount-Wim /Commit failed." }
+              } catch {
+                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Discard | Out-Null
+                throw $_
               }
+
+              Write-Host "=== Final install.wim Info After IoT Conversion ==="
+              dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
             }
+          } elseif ($convertToIoT -eq "true" -and $env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
+            Write-Host "Native IoT ISO detected; keeping its IoT edition and skipping conversion."
           }
+
       - name: Run W10UI slipstream
         shell: cmd
         run: |
           cd /d "%GITHUB_WORKSPACE%\w10UI"
           call W10UI.cmd
+
       - name: Upload updated ISO to Buzzheavier
         shell: pwsh
         run: |
@@ -313,7 +355,8 @@ jobs:
           if (-not $fileId) {
             throw "Could not parse file ID from Buzzheavier response: $response"
           }
-          $uploadUrl = "https://w.buzzheavier.com/$cleanName.iso"
+
+          $downloadLink = "https://buzzheavier.com/$fileId"
 
           Write-Host "=========================================="
           Write-Host "SUCCESS! Download your updated ISO here:"
