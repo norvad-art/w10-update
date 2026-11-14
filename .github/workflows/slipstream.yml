@@ -1,22 +1,21 @@
 name: Slipstream Windows 10 ISO with W10UI
-
-on:
+'on':
   workflow_dispatch:
     inputs:
       iso_url:
-        description: 'Direct .iso URL or Buzzheavier URL for base Windows 10 ISO'
+        description: Direct .iso URL or Buzzheavier URL for base Windows 10 ISO
         required: true
         default: ''
       iso_sha256:
-        description: 'Expected SHA-256 checksum of base ISO (leave blank to skip check)'
+        description: Expected SHA-256 checksum of base ISO (leave blank to skip check)
         required: false
         default: ''
       wim_index:
-        description: 'WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All)'
+        description: WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All)
         required: true
         default: '1'
       convert_to_iot:
-        description: 'Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped if native IoT ISO SHA matches)'
+        description: Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped if native IoT ISO SHA matches)
         type: choice
         required: true
         default: 'true'
@@ -24,26 +23,23 @@ on:
           - 'true'
           - 'false'
       lcu_url:
-        description: 'Direct .msu download URL for Cumulative Update (from MS Update Catalog)'
+        description: Direct .msu download URL for Cumulative Update (from MS Update Catalog)
         required: true
       dotnet_url:
-        description: 'Optional direct .msu/.cab download URL for .NET Framework Update'
+        description: Optional direct .msu/.cab download URL for .NET Framework Update
         required: false
         default: ''
       output_name:
-        description: 'Output ISO filename (without .iso)'
+        description: Output ISO filename (without .iso)
         required: true
-        default: 'Win10_IoT_LTSC_2021_x64_Updated'
-
+        default: Win10_IoT_LTSC_2021_x64_Updated
 jobs:
   build-iso:
     runs-on: windows-latest
     timeout-minutes: 180
-
     steps:
-      - name: Checkout repository (W10UI folder)
+      - name: Checkout repository (w10UI folder)
         uses: actions/checkout@v4
-
       - name: Prepare D:\work directories and configure W10UI.ini
         shell: pwsh
         run: |
@@ -60,9 +56,18 @@ jobs:
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
           }
 
-          $iniPath = Join-Path $env:GITHUB_WORKSPACE "W10UI\W10UI.ini"
+          $w10uiDir = Join-Path $env:GITHUB_WORKSPACE "w10UI"
+          $iniPath = Join-Path $w10uiDir "W10UI.ini"
           if (-not (Test-Path $iniPath)) {
-            throw "W10UI.ini not found at $iniPath. Ensure your folder is named W10UI in the repo root."
+            throw "W10UI.ini not found at $iniPath. Ensure your folder is named w10UI in the repo root."
+          }
+
+          $hasOscdimg = (Test-Path (Join-Path $w10uiDir "oscdimg.exe")) -or `
+                        (Test-Path (Join-Path $w10uiDir "bin\oscdimg.exe")) -or `
+                        (Test-Path (Join-Path $w10uiDir "cdimage.exe")) -or `
+                        (Test-Path (Join-Path $w10uiDir "bin\cdimage.exe"))
+          if (-not $hasOscdimg) {
+            throw "oscdimg.exe (or cdimage.exe) not found in w10UI\ or w10UI\bin\. Upload oscdimg.exe to your repo before running."
           }
 
           $ini = Get-Content -Path $iniPath -Raw
@@ -95,7 +100,6 @@ jobs:
           Set-Content -Path $iniPath -Value $ini -Encoding ASCII
           Write-Host "=== Active W10UI.ini Configuration ==="
           Get-Content -Path $iniPath
-
       - name: Download and verify base ISO
         shell: pwsh
         run: |
@@ -157,7 +161,6 @@ jobs:
             }
             Write-Host "SHA-256 verified against expected input."
           }
-
       - name: Download Windows Update packages
         shell: pwsh
         run: |
@@ -183,7 +186,6 @@ jobs:
           }
 
           Get-ChildItem "D:\work\updates"
-
       - name: Free up disk space on runner
         shell: pwsh
         run: |
@@ -216,7 +218,6 @@ jobs:
 
           Write-Host "=== Free space AFTER cleanup ==="
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}} | Format-Table
-
       - name: Extract, trim, and convert base ISO to IoT LTSC
         shell: pwsh
         run: |
@@ -238,20 +239,19 @@ jobs:
 
           $keepIndex = "${{ github.event.inputs.wim_index }}".Trim()
           $wimPath = "D:\work\iso\sources\install.wim"
-          $wimlib = Join-Path $env:GITHUB_WORKSPACE "W10UI\bin\wimlib-imagex.exe"
 
           if ($keepIndex -ne "0" -and (Test-Path $wimPath)) {
             Write-Host "=== Original install.wim Info ==="
-            & $wimlib info $wimPath
+            dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
 
-            Write-Host "Trimming install.wim to single Index $keepIndex ..."
+            Write-Host "Trimming install.wim to single Index $keepIndex using DISM..."
             $trimmedWim = "D:\work\install_trimmed.wim"
-            & $wimlib export $wimPath $keepIndex $trimmedWim
-            if ($LASTEXITCODE -ne 0) { throw "wimlib export failed for index $keepIndex." }
+            dism.exe /English /Export-Image /SourceImageFile:"$wimPath" /SourceIndex:$keepIndex /DestinationImageFile:"$trimmedWim" /Compress:max /CheckIntegrity
+            if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image failed for index $keepIndex." }
 
             Move-Item -Path $trimmedWim -Destination $wimPath -Force
             Write-Host "=== Trimmed install.wim Info ==="
-            & $wimlib info $wimPath
+            dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
           }
 
           $convertToIoT = "${{ github.event.inputs.convert_to_iot }}".Trim()
@@ -283,17 +283,15 @@ jobs:
                 }
 
                 Write-Host "=== Final install.wim Info After IoT Conversion ==="
-                & $wimlib info $wimPath
+                dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
               }
             }
           }
-
       - name: Run W10UI slipstream
         shell: cmd
         run: |
-          cd /d "%GITHUB_WORKSPACE%\W10UI"
+          cd /d "%GITHUB_WORKSPACE%\w10UI"
           call W10UI.cmd
-
       - name: Upload updated ISO to Buzzheavier
         shell: pwsh
         run: |
@@ -305,8 +303,8 @@ jobs:
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
           $uploadUrl = "https://buzzheavier.com"
 
-          Write-Host "Uploading $($builtIso.Name) ($([math]::Round($builtIso.Length/1GB, 2)) GB) to Buzzheavier..."
-          $response = curl.exe --fail --retry 3 -T "$($builtIso.FullName)" "$uploadUrl"
+          Write-Host "Uploading $($builtIso.Name) ($([math]::Round($builtIso.Length/1GB, 2)) GB) to $uploadUrl..."
+          $response = curl.exe -s --fail --retry 3 -T "$($builtIso.FullName)" "$uploadUrl"
           if ($LASTEXITCODE -ne 0) { throw "Buzzheavier upload failed." }
 
           Write-Host "Upload response: $response"
