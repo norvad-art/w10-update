@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       iso_url:
-        description: Direct URL or .torrent URL for en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
+        description: Direct URL, .torrent URL, or magnet link for en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
         required: true
       lcu_url:
         description: Direct download URL for Latest Cumulative Update (.msu / .cab / .exe)
@@ -50,13 +50,14 @@ jobs:
           $ini = $ini -replace '^ISO\s*=.*', 'ISO           =0'
           Set-Content -Path $iniPath -Value $ini
 
-      - name: Download base ISO and updates to D:\work
+      - name: Download and verify base ISO + updates once to D:\work
         shell: pwsh
         run: |
           choco install aria2 -y --no-progress | Out-Null
 
           $isoUrl = "${{ github.event.inputs.iso_url }}".Trim()
           $isoPath = "D:\work\base.iso"
+          $expectedSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
           $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
           if ($isoUrl -match "^magnet:\?" -or $isoUrl -match "\.torrent(\?.*)?$") {
@@ -89,8 +90,16 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "ISO download failed." }
           }
 
-          $baseSha = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
-          Write-Host "Base ISO SHA-256: $baseSha"
+          Write-Host "Verifying SHA-256 checksum of base.iso..."
+          $actualSha = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
+          if ($actualSha -ne $expectedSha) {
+            throw "SHA-256 mismatch! Expected: $expectedSha | Actual: $actualSha"
+          }
+          Write-Host "SHA-256 verified: $actualSha"
+
+          $baseSizeGB = [math]::Round((Get-Item $isoPath).Length / 1GB, 3)
+          "BASE_ISO_SIZE_GB=$baseSizeGB" >> $env:GITHUB_ENV
+          "BASE_ISO_SHA256=$actualSha" >> $env:GITHUB_ENV
 
           function Download-Update($url, $fallbackName) {
             if (-not $url) { return }
@@ -105,14 +114,12 @@ jobs:
           Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
           Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
 
-          Get-ChildItem "D:\work\updates"
-
       - name: Run Both Builds (Trimmed Index 2 vs Dual Index) and Compare
         shell: pwsh
         run: |
           function Compress-Wim($wimFile, $tempFile) {
             $info = dism.exe /English /Get-WimInfo /WimFile:"$wimFile"
-            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups.Value }
             if (-not $indexes) { throw "Could not detect indexes in $wimFile" }
 
             if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
@@ -194,7 +201,7 @@ jobs:
             }
           }
 
-          "### Side-by-Side Test Comparison (Base ISO: $env:BASE_ISO_SIZE_GB GB)" >> $env:GITHUB_STEP_SUMMARY
+          "### Side-by-Side Test Comparison (Base ISO: $env:BASE_ISO_SIZE_GB GB | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
           "| Mode | Output ISO | Final ISO Size | `install.wim` | `boot.wim` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
           "| :--- | :--- | :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
           foreach ($r in $results) {
