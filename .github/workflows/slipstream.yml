@@ -1,35 +1,23 @@
-name: Slipstream Windows 10 ISO with W10UI
+name: Slipstream Windows 10 IoT LTSC 2021
 
 on:
   workflow_dispatch:
     inputs:
       iso_url:
-        description: Direct .iso URL or Buzzheavier URL for base Windows 10 ISO
+        description: Direct URL or .torrent URL for en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
         required: true
-        default: ''
-      iso_sha256:
-        description: Expected SHA-256 checksum of base ISO (leave blank to skip check)
-        required: false
-        default: ''
-      wim_index:
-        description: WIM Edition Index to keep (1 = Enterprise LTSC, 2 = IoT on dual-index ISO, 0 = Keep All; native IoT ISO SHA automatically keeps index 2)
-        required: true
-        default: '1'
-      convert_to_iot:
-        description: Convert Enterprise LTSC to IoT Enterprise LTSC (auto-skipped for native IoT ISO)
-        type: choice
-        required: true
-        default: 'true'
-        options:
-          - 'true'
-          - 'false'
       lcu_url:
-        description: Direct .msu download URL for Cumulative Update (from MS Update Catalog)
+        description: Direct download URL for Latest Cumulative Update (.msu / .cab / .exe)
         required: true
       dotnet_url:
-        description: Optional direct .msu/.cab download URL for .NET Framework Update
+        description: Optional direct download URL for .NET Framework Update (.msu / .cab / .exe)
         required: false
         default: ''
+      keep_iot_only:
+        description: Keep only Index 2 (IoT Enterprise LTSC) instead of both indexes
+        type: boolean
+        required: true
+        default: false
       output_name:
         description: Output ISO filename (without .iso)
         required: true
@@ -44,328 +32,128 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare working folders and copy W10UI
+      - name: Prepare D:\work directories and copy W10UI
         shell: pwsh
         run: |
-          $workDirs = @(
-            "D:\work",
-            "D:\work\iso",
+          $dirs = @(
             "D:\work\updates",
             "D:\work\temp",
             "D:\work\mount",
             "D:\work\mountre",
             "D:\work\out",
-            "D:\work\W10UI",
-            "D:\work"
+            "D:\work\W10UI"
           )
-
-          foreach ($dir in $workDirs) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          foreach ($d in $dirs) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
           }
 
-          Write-Host "Installing aria2..."
-          choco install aria2 -y --no-progress
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install aria2."
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\W10UI\*" -Destination "D:\work\W10UI" -Recurse -Force
+
+          if (-not (Test-Path "D:\work\W10UI\oscdimg.exe")) {
+            throw "oscdimg.exe not found in W10UI folder."
           }
 
-          $sourceW10uiDir = Join-Path $env:GITHUB_WORKSPACE "W10UI"
-          $w10uiDir = "D:\work\W10UI"
-
-          if (-not (Test-Path (Join-Path $sourceW10uiDir "W10UI.ini"))) {
-            throw "W10UI.ini not found in the repository's W10UI folder."
-          }
-
-          Copy-Item -Path (Join-Path $sourceW10uiDir "*") `
-            -Destination $w10uiDir -Recurse -Force
-
-          $iniPath = Join-Path $w10uiDir "W10UI.ini"
-          $oscdimgPath = Join-Path $w10uiDir "oscdimg.exe"
-
-          if (-not (Test-Path $oscdimgPath) -and
-              -not (Test-Path (Join-Path $w10uiDir "bin\oscdimg.exe")) -and
-              -not (Test-Path (Join-Path $w10uiDir "cdimage.exe")) -and
-              -not (Test-Path (Join-Path $w10uiDir "bin\cdimage.exe"))) {
-            throw "oscdimg.exe (or cdimage.exe) was not found in the W10UI folder."
-          }
-
-          Write-Host "Using W10UI folder: $w10uiDir"
-          Write-Host "Using W10UI configuration: $iniPath"
-          Write-Host "W10UI.ini will be used as checked into the repository; this workflow does not modify it."
-
-
-      - name: Download and verify base ISO to D
+      - name: Download base ISO and updates to D:\work
         shell: pwsh
         run: |
-          $inputUrl = "${{ github.event.inputs.iso_url }}".Trim()
+          choco install aria2 -y --no-progress | Out-Null
+
+          $isoUrl = "${{ github.event.inputs.iso_url }}".Trim()
           $isoPath = "D:\work\base.iso"
           $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          $uri = [System.Uri]$inputUrl
-          $refererUrl = "$($uri.Scheme)://$($uri.Host)/"
+          if ($isoUrl -match "\.torrent(\?.*)?$") {
+            New-Item -ItemType Directory -Path "D:\work\torrent" -Force | Out-Null
+            aria2c --dir="D:\work\torrent" --seed-time=0 --bt-max-peers=100 --user-agent="$ua" --summary-interval=15 "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "Torrent download failed." }
 
-          if ($inputUrl -match "\.torrent(\?.*)?$") {
-            Write-Host "Downloading torrent via aria2c (P2P + Web Seeds)..."
-            $torrentTmpDir = "D:\work\torrent_tmp"
-            New-Item -ItemType Directory -Path $torrentTmpDir -Force | Out-Null
-
-            aria2c --dir="$torrentTmpDir" `
-              --seed-time=0 `
-              --bt-max-peers=100 `
-              --user-agent="$ua" `
-              --summary-interval=15 `
-              "$inputUrl"
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "aria2c torrent download failed."
-            }
-
-            $downloadedIso = Get-ChildItem -Path $torrentTmpDir -Filter "*.iso" -Recurse |
-              Sort-Object Length -Descending |
-              Select-Object -First 1
-
-            if (-not $downloadedIso) {
-              throw "No .iso file was found inside the downloaded torrent."
-            }
-
-            Move-Item -Path $downloadedIso.FullName -Destination $isoPath -Force
-            Remove-Item -Path $torrentTmpDir -Recurse -Force -ErrorAction SilentlyContinue
-
+            $dlIso = Get-ChildItem -Path "D:\work\torrent" -Filter "*.iso" -Recurse | Sort-Object Length -Descending | Select-Object -First 1
+            if (-not $dlIso) { throw "No .iso found in torrent." }
+            Move-Item -Path $dlIso.FullName -Destination $isoPath -Force
           } else {
-            Write-Host "Downloading base ISO to $isoPath via multi-threaded aria2c..."
-            aria2c --dir="D:\work" `
-              --out="base.iso" `
-              -x 16 -s 16 -k 1M `
-              --max-tries=5 `
-              --retry-wait=3 `
-              --user-agent="$ua" `
-              --referer="$refererUrl" `
-              --summary-interval=15 `
-              "$inputUrl"
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "aria2c HTTP download failed."
-            }
+            $uri = [System.Uri]$isoUrl
+            aria2c --dir="D:\work" --out="base.iso" -x 16 -s 16 -k 1M --max-tries=5 --retry-wait=3 --user-agent="$ua" --referer="$($uri.Scheme)://$($uri.Host)/" --summary-interval=15 "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "ISO download failed." }
           }
 
-          if (-not (Test-Path $isoPath)) {
-            throw "ISO download failed."
+          Write-Host "Base ISO SHA-256: $((Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower())"
+
+          function Download-Update($url, $fallbackName) {
+            if (-not $url) { return }
+            $fileName = [System.IO.Path]::GetFileName(([System.Uri]$url).LocalPath)
+            if ($fileName -notmatch '\.(msu|cab|exe)$') { $fileName = $fallbackName }
+            $dest = Join-Path "D:\work\updates" $fileName
+            Write-Host "Downloading $fileName..."
+            curl.exe -L --fail --retry 3 -o "$dest" "$url"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to download $url" }
           }
 
-          Write-Host "Calculating SHA-256 checksum..."
-          $actualHash = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
-          Write-Host "Downloaded ISO SHA-256: $actualHash"
-          "ACTUAL_ISO_SHA256=$actualHash" >> $env:GITHUB_ENV
+          Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
+          Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
 
-          $expectedHash = "${{ github.event.inputs.iso_sha256 }}".Trim().ToLower()
-          if ($expectedHash) {
-            if ($actualHash -ne $expectedHash) {
-              throw "SHA-256 mismatch! Expected: $expectedHash | Actual: $actualHash"
-            }
-            Write-Host "SHA-256 verified against expected input."
-          }
+          Get-ChildItem "D:\work\updates"
 
-
-      - name: Download Windows Update packages to D
+      - name: Optional trim to Index 2 (IoT Enterprise LTSC only)
+        if: ${{ github.event.inputs.keep_iot_only == 'true' }}
         shell: pwsh
         run: |
-          $updatesDir = "D:\work\updates"
-          $lcuUrl = "${{ github.event.inputs.lcu_url }}".Trim()
-          $lcuFile = Join-Path $updatesDir ([System.IO.Path]::GetFileName(([System.Uri]$lcuUrl).LocalPath))
+          Write-Host "Extracting base.iso to D:\work\iso to trim to Index 2..."
+          7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed." }
 
-          if (-not $lcuFile.EndsWith(".msu", [System.StringComparison]::OrdinalIgnoreCase) -and
-              -not $lcuFile.EndsWith(".cab", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $lcuFile = Join-Path $updatesDir "lcu_update.msu"
+          Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
+            $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
           }
 
-          Write-Host "Downloading LCU update..."
-          curl.exe -L --fail --retry 3 -o $lcuFile "$lcuUrl"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to download LCU update."
-          }
+          $wimPath = "D:\work\iso\sources\install.wim"
+          dism.exe /English /Export-Image /SourceImageFile:"$wimPath" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
+          if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image for Index 2 failed." }
 
-          $dotnetUrl = "${{ github.event.inputs.dotnet_url }}".Trim()
-          if ($dotnetUrl) {
-            $dotnetFile = Join-Path $updatesDir ([System.IO.Path]::GetFileName(([System.Uri]$dotnetUrl).LocalPath))
+          Move-Item -Path "D:\work\install_iot.wim" -Destination $wimPath -Force
+          Remove-Item -Path "D:\work\base.iso" -Force
 
-            if (-not $dotnetFile.EndsWith(".msu", [System.StringComparison]::OrdinalIgnoreCase) -and
-                -not $dotnetFile.EndsWith(".cab", [System.StringComparison]::OrdinalIgnoreCase)) {
-              $dotnetFile = Join-Path $updatesDir "dotnet_update.msu"
-            }
+          # Point W10UI Target to extracted folder instead of base.iso
+          (Get-Content "D:\work\W10UI\W10UI.ini") -replace '^Target\s*=.*', 'Target        =D:\work\iso' | Set-Content "D:\work\W10UI\W10UI.ini"
 
-            Write-Host "Downloading .NET update..."
-            curl.exe -L --fail --retry 3 -o $dotnetFile "$dotnetUrl"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to download .NET update."
-            }
-          }
-
-          Get-ChildItem $updatesDir
-
-      - name: Extract ISO to C and prepare image
-        shell: pwsh
-        run: |
-          $isoPath = "D:\work\base.iso"
-          $extractDir = "D:\work\iso"
-
-          Write-Host "Extracting ISO from D: to $extractDir ..."
-          7z x $isoPath -o"$extractDir" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "7z extraction failed."
-          }
-
-          Write-Host "Keeping the original ISO at $isoPath."
-
-          Get-ChildItem -Path $extractDir -Recurse -Force | ForEach-Object {
-            if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
-              $_.Attributes = $_.Attributes -bxor [System.IO.FileAttributes]::ReadOnly
-            }
-          }
-
-          $nativeIotSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
-          $wimPath = Join-Path $extractDir "sources\install.wim"
-
-          if (-not (Test-Path $wimPath)) {
-            throw "sources\install.wim not found. This workflow requires an ISO containing install.wim."
-          }
-
-          if ($env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
-            $keepIndex = "2"
-            Write-Host "Native IoT ISO SHA-256 matched; automatically keeping image index 2."
-          } else {
-            $keepIndex = "${{ github.event.inputs.wim_index }}".Trim()
-            Write-Host "Using requested WIM index: $keepIndex"
-          }
-
-          if ($keepIndex -ne "0") {
-            Write-Host "=== Original install.wim Info ==="
-            dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Could not read install.wim information."
-            }
-
-            Write-Host "Trimming install.wim to index $keepIndex..."
-            $trimmedWim = "D:\work\install_trimmed.wim"
-            dism.exe /English /Export-Image /SourceImageFile:"$wimPath" `
-              /SourceIndex:$keepIndex /DestinationImageFile:"$trimmedWim" `
-              /Compress:max /CheckIntegrity
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "DISM Export-Image failed for index $keepIndex."
-            }
-
-            Move-Item -Path $trimmedWim -Destination $wimPath -Force
-
-            Write-Host "=== Trimmed install.wim Info ==="
-            dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
-          }
-
-          $convertToIoT = "${{ github.event.inputs.convert_to_iot }}".Trim()
-
-          if ($convertToIoT -eq "true" -and $env:ACTUAL_ISO_SHA256 -ne $nativeIotSha) {
-            $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"$wimPath" /Index:1
-
-            if ($wimInfo -match "Edition ID\s*:\s*IoTEnterpriseS") {
-              Write-Host "Image is already IoTEnterpriseS. Skipping edition conversion."
-            } else {
-              Write-Host "Mounting install.wim to convert edition..."
-              dism.exe /English /Mount-Wim /WimFile:"$wimPath" /Index:1 `
-                /MountDir:"D:\work\mount"
-
-              if ($LASTEXITCODE -ne 0) {
-                throw "DISM Mount-Wim failed."
-              }
-
-              try {
-                dism.exe /English /Image:"D:\work\mount" /Set-Edition:IoTEnterpriseS
-                if ($LASTEXITCODE -ne 0) {
-                  throw "DISM Set-Edition:IoTEnterpriseS failed."
-                }
-
-                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Commit
-                if ($LASTEXITCODE -ne 0) {
-                  throw "DISM Unmount-Wim /Commit failed."
-                }
-              } catch {
-                dism.exe /English /Unmount-Wim /MountDir:"D:\work\mount" /Discard | Out-Null
-                throw $_
-              }
-
-              Write-Host "=== Final install.wim Info ==="
-              dism.exe /English /Get-WimInfo /WimFile:"$wimPath"
-            }
-          } elseif ($convertToIoT -eq "true" -and $env:ACTUAL_ISO_SHA256 -eq $nativeIotSha) {
-            Write-Host "Native IoT ISO detected; skipping edition conversion."
-          }
-
-      - name: Run W10UI slipstream, compress WIM, and build ISO
+      - name: Run W10UI slipstream and ISO build
         shell: pwsh
         run: |
           Push-Location "D:\work\W10UI"
           cmd.exe /c "W10UI.cmd"
           Pop-Location
 
-          $wimPath = "D:\work\iso\sources\install.wim"
-          $compressedWim = "D:\work\install_max.wim"
-
-          Write-Host "Exporting install.wim with /Compress:max..."
-          dism.exe /English /Export-Image /SourceImageFile:"$wimPath" `
-            /All /DestinationImageFile:"$compressedWim" `
-            /Compress:max /CheckIntegrity
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Final DISM Export-Image failed."
+          $generatedIso = Get-ChildItem -Path "D:\work\out\*.iso" | Select-Object -First 1
+          if (-not $generatedIso) {
+            throw "W10UI did not produce an ISO in D:\work\out."
           }
 
-          Move-Item -Path $compressedWim -Destination $wimPath -Force
-          Write-Host "Building bootable ISO with oscdimg.exe..."
-          $oscdimg = Get-ChildItem -Path "D:\work\W10UI" -Filter "oscdimg.exe" -Recurse | Select-Object -First 1
           $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
-          $outIso = "D:\work\out\$cleanName.iso"
-
-          $etfsboot = "D:\work\iso\boot\etfsboot.com"
-          $efisys = "D:\work\iso\efi\microsoft\boot\efisys.bin"
-          $bootData = "2#p0,e,b$etfsboot#pEF,e,b$efisys"
-
-          & $oscdimg.FullName -m -o -u2 -udfver102 `
-            "-bootdata:$bootData" `
-            "D:\work\iso" "$outIso"
-
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outIso)) {
-            throw "oscdimg.exe failed to create the ISO."
+          $finalIso = "D:\work\out\$cleanName.iso"
+          if ($generatedIso.FullName -ne $finalIso) {
+            Move-Item -Path $generatedIso.FullName -Destination $finalIso -Force
           }
 
+          Write-Host "Final ISO ready: $finalIso ($([math]::Round((Get-Item $finalIso).Length / 1GB, 2)) GB)"
 
-      - name: Upload updated ISO to Buzzheavier
+      - name: Upload ISO to Buzzheavier
         shell: pwsh
         run: |
-          $builtIso = Get-ChildItem -Path "D:\work\out\*.iso" | Select-Object -First 1
-          if (-not $builtIso) {
-            throw "No output ISO found in D:\work\out. Check the W10UI logs."
-          }
-
-          $cleanName = "${{ github.event.inputs.output_name }}".Trim() -replace '[^a-zA-Z0-9._-]', '_'
+          $cleanName = ("${{ github.event.inputs.output_name }}".Trim() -replace '\.iso$', '') -replace '[^a-zA-Z0-9._-]', '_'
+          $finalIso = "D:\work\out\$cleanName.iso"
           $uploadUrl = "https://w.buzzheavier.com/$cleanName.iso"
 
-          Write-Host "Uploading $($builtIso.Name) ($([math]::Round($builtIso.Length/1GB, 2)) GB)..."
-          $response = curl.exe -s --fail --retry 3 -T "$($builtIso.FullName)" "$uploadUrl"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Buzzheavier upload failed."
-          }
+          Write-Host "Uploading $cleanName.iso to Buzzheavier..."
+          $response = curl.exe -s --fail --retry 3 -T "$finalIso" "$uploadUrl"
+          if ($LASTEXITCODE -ne 0) { throw "Buzzheavier upload failed." }
 
-          Write-Host "Upload response: $response"
           $json = $response | ConvertFrom-Json
           $fileId = $json.data.id
-
-          if (-not $fileId) {
-            throw "Could not parse file ID from Buzzheavier response: $response"
-          }
+          if (-not $fileId) { throw "Could not parse file ID from Buzzheavier response: $response" }
 
           $downloadLink = "https://buzzheavier.com/$fileId"
+          Write-Host "SUCCESS! Download link: $downloadLink"
 
-          Write-Host "SUCCESS! Download your updated ISO here:"
-          Write-Host $downloadLink
-
-          "### Updated Windows 10 ISO Ready" >> $env:GITHUB_STEP_SUMMARY
+          "### Updated Windows 10 IoT LTSC 2021 ISO Ready" >> $env:GITHUB_STEP_SUMMARY
           "- **Filename:** ``$cleanName.iso``" >> $env:GITHUB_STEP_SUMMARY
+          "- **Size:** $([math]::Round((Get-Item $finalIso).Length / 1GB, 2)) GB" >> $env:GITHUB_STEP_SUMMARY
           "- **Download Link:** $downloadLink" >> $env:GITHUB_STEP_SUMMARY
