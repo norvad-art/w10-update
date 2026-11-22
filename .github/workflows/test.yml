@@ -1,0 +1,172 @@
+name: Test Slipstream Windows 10 IoT LTSC 2021 (No Upload)
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: Direct URL or .torrent URL for en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
+        required: true
+      lcu_url:
+        description: Direct download URL for Latest Cumulative Update (.msu / .cab / .exe)
+        required: true
+      dotnet_url:
+        description: Optional direct download URL for .NET Framework Update (.msu / .cab / .exe)
+        required: false
+        default: ''
+      keep_iot_only:
+        description: Keep only Index 2 (IoT Enterprise LTSC) instead of both indexes
+        type: boolean
+        required: true
+        default: false
+      output_name:
+        description: Output ISO filename (without .iso)
+        required: true
+        default: W10_IoT_LTSC_2021_x64_Test
+
+jobs:
+  test-build-iso:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare D:\work directories and copy W10UI
+        shell: pwsh
+        run: |
+          $dirs = @(
+            "D:\work\updates",
+            "D:\work\temp",
+            "D:\work\mount",
+            "D:\work\mountre",
+            "D:\work\out",
+            "D:\work\W10UI"
+          )
+          foreach ($d in $dirs) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+          }
+
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\W10UI\*" -Destination "D:\work\W10UI" -Recurse -Force
+
+          if (-not (Test-Path "D:\work\W10UI\oscdimg.exe")) {
+            throw "oscdimg.exe not found in W10UI folder."
+          }
+
+      - name: Download base ISO and updates to D:\work
+        shell: pwsh
+        run: |
+          choco install aria2 -y --no-progress | Out-Null
+
+          $isoUrl = "${{ github.event.inputs.iso_url }}".Trim()
+          $isoPath = "D:\work\base.iso"
+          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          if ($isoUrl -match "\.torrent(\?.*)?$") {
+            New-Item -ItemType Directory -Path "D:\work\torrent" -Force | Out-Null
+            aria2c --dir="D:\work\torrent" --seed-time=0 --bt-max-peers=100 --user-agent="$ua" --summary-interval=15 "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "Torrent download failed." }
+
+            $dlIso = Get-ChildItem -Path "D:\work\torrent" -Filter "*.iso" -Recurse | Sort-Object Length -Descending | Select-Object -First 1
+            if (-not $dlIso) { throw "No .iso found in torrent." }
+            Move-Item -Path $dlIso.FullName -Destination $isoPath -Force
+          } else {
+            $uri = [System.Uri]$isoUrl
+            aria2c --dir="D:\work" --out="base.iso" -x 16 -s 16 -k 1M --max-tries=5 --retry-wait=3 --user-agent="$ua" --referer="$($uri.Scheme)://$($uri.Host)/" --summary-interval=15 "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "ISO download failed." }
+          }
+
+          $baseSizeGB = [math]::Round((Get-Item $isoPath).Length / 1GB, 3)
+          $baseSha = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
+          "BASE_ISO_SIZE_GB=$baseSizeGB" >> $env:GITHUB_ENV
+          "BASE_ISO_SHA256=$baseSha" >> $env:GITHUB_ENV
+
+          function Download-Update($url, $fallbackName) {
+            if (-not $url) { return }
+            $fileName = [System.IO.Path]::GetFileName(([System.Uri]$url).LocalPath)
+            if ($fileName -notmatch '\.(msu|cab|exe)$') { $fileName = $fallbackName }
+            $dest = Join-Path "D:\work\updates" $fileName
+            Write-Host "Downloading $fileName..."
+            curl.exe -L --fail --retry 3 -o "$dest" "$url"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to download $url" }
+          }
+
+          Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
+          Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
+
+          Get-ChildItem "D:\work\updates"
+
+      - name: Optional trim to Index 2 (IoT Enterprise LTSC only)
+        if: ${{ github.event.inputs.keep_iot_only == 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host "Extracting base.iso to D:\work\iso to trim to Index 2..."
+          7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed." }
+
+          Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
+            $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+          }
+
+          $wimPath = "D:\work\iso\sources\install.wim"
+          dism.exe /English /Export-Image /SourceImageFile:"$wimPath" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
+          if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image for Index 2 failed." }
+
+          Move-Item -Path "D:\work\install_iot.wim" -Destination $wimPath -Force
+          Remove-Item -Path "D:\work\base.iso" -Force
+
+          (Get-Content "D:\work\W10UI\W10UI.ini") -replace '^Target\s*=.*', 'Target        =D:\work\iso' | Set-Content "D:\work\W10UI\W10UI.ini"
+
+      - name: Run W10UI slipstream and ISO build
+        shell: pwsh
+        run: |
+          Push-Location "D:\work\W10UI"
+          cmd.exe /c "W10UI.cmd"
+          Pop-Location
+
+          $generatedIso = Get-ChildItem -Path "D:\work\out\*.iso" | Select-Object -First 1
+          if (-not $generatedIso) {
+            throw "W10UI did not produce an ISO in D:\work\out."
+          }
+
+          $cleanName = ("${{ github.event.inputs.output_name }}".Trim() -replace '\.iso$', '') -replace '[^a-zA-Z0-9._-]', '_'
+          $finalIso = "D:\work\out\$($cleanName).iso"
+          if ($generatedIso.FullName -ne $finalIso) {
+            Move-Item -Path $generatedIso.FullName -Destination $finalIso -Force
+          }
+
+      - name: Inspect final ISO size and WIM info (No Upload)
+        shell: pwsh
+        run: |
+          $cleanName = ("${{ github.event.inputs.output_name }}".Trim() -replace '\.iso$', '') -replace '[^a-zA-Z0-9._-]', '_'
+          $finalIso = Get-Item "D:\work\out\$($cleanName).iso"
+
+          $isoBytes = $finalIso.Length
+          $isoGB = [math]::Round($isoBytes / 1GB, 3)
+          $isoMiB = [math]::Round($isoBytes / 1MB, 2)
+          $isoSha = (Get-FileHash -Path $finalIso.FullName -Algorithm SHA256).Hash.ToLower()
+
+          Write-Host "=== Final ISO Details ==="
+          Write-Host "File: $($finalIso.Name)"
+          Write-Host "Size: $isoGB GB ($isoMiB MiB / $isoBytes bytes)"
+          Write-Host "SHA-256: $isoSha"
+
+          # Inspect contents inside the generated ISO using 7z
+          Write-Host "=== ISO Internal File Sizes (sources/) ==="
+          7z l "$($finalIso.FullName)" "sources\*.wim" "sources\*.esd"
+
+          # Extract install.wim temporarily to inspect edition indexes & build number
+          7z x "$($finalIso.FullName)" "sources\install.wim" -o"D:\work\inspect" -y | Out-Null
+          $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"D:\work\inspect\sources\install.wim"
+          $wimInfo
+
+          "### Test Build Results (No Upload)" >> $env:GITHUB_STEP_SUMMARY
+          "- **Output Filename:** ``$($finalIso.Name)``" >> $env:GITHUB_STEP_SUMMARY
+          "- **Final ISO Size:** **$isoGB GB** ($isoMiB MiB / ``$isoBytes`` bytes)" >> $env:GITHUB_STEP_SUMMARY
+          "- **Base ISO Size:** $env:BASE_ISO_SIZE_GB GB (``$env:BASE_ISO_SHA256``)" >> $env:GITHUB_STEP_SUMMARY
+          "- **Output SHA-256:** ``$isoSha``" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "#### WIM Edition Info" >> $env:GITHUB_STEP_SUMMARY
+          "``````text" >> $env:GITHUB_STEP_SUMMARY
+          ($wimInfo -join "`n") >> $env:GITHUB_STEP_SUMMARY
+          "``````" >> $env:GITHUB_STEP_SUMMARY
