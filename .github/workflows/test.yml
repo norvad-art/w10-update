@@ -1,4 +1,4 @@
-name: Test Slipstream Windows 10 IoT LTSC 2021 (No Upload)
+name: Test Slipstream Windows 10 IoT LTSC 2021 (Compare Both)
 
 on:
   workflow_dispatch:
@@ -13,18 +13,9 @@ on:
         description: Optional direct download URL for .NET Framework Update (.msu / .cab / .exe)
         required: false
         default: ''
-      keep_iot_only:
-        description: Keep only Index 2 (IoT Enterprise LTSC) instead of both indexes
-        type: boolean
-        required: true
-        default: true
-      output_name:
-        description: Output ISO filename (without .iso)
-        required: true
-        default: W10_IoT_LTSC_2021_x64_Test
 
 jobs:
-  test-build-iso:
+  compare-builds:
     runs-on: windows-latest
     timeout-minutes: 180
 
@@ -36,7 +27,6 @@ jobs:
         shell: pwsh
         run: |
           $dirs = @(
-            "D:\work\iso",
             "D:\work\updates",
             "D:\work\temp",
             "D:\work\mount",
@@ -54,14 +44,13 @@ jobs:
             throw "oscdimg.exe not found in W10UI folder."
           }
 
-          # Ensure W10UI.ini points to D:\work\iso folder and ISO=0 (we compress & pack after W10UI)
           $iniPath = "D:\work\W10UI\W10UI.ini"
           $ini = Get-Content $iniPath
           $ini = $ini -replace '^Target\s*=.*', 'Target        =D:\work\iso'
           $ini = $ini -replace '^ISO\s*=.*', 'ISO           =0'
           Set-Content -Path $iniPath -Value $ini
 
-      - name: Download base ISO and updates to D:\work
+      - name: Download base ISO and updates once to D:\work
         shell: pwsh
         run: |
           choco install aria2 -y --no-progress | Out-Null
@@ -102,81 +91,96 @@ jobs:
           Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
           Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
 
-      - name: Extract ISO to D:\work\iso (and optionally trim to Index 2)
+      - name: Run Both Builds (Trimmed Index 2 vs Dual Index) and Compare
         shell: pwsh
         run: |
-          Write-Host "Extracting base.iso to D:\work\iso..."
-          7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed." }
+          function Compress-Wim($wimFile, $tempFile) {
+            $info = dism.exe /English /Get-WimInfo /WimFile:"$wimFile"
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
+            if (-not $indexes) { throw "Could not detect indexes in $wimFile" }
 
-          Remove-Item -Path "D:\work\base.iso" -Force
+            if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
 
-          Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
-            $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+            foreach ($idx in $indexes) {
+              Write-Host "Exporting index $idx of $(Split-Path $wimFile -Leaf) with /Compress:max..."
+              dism.exe /English /Export-Image /SourceImageFile:"$wimFile" /SourceIndex:$idx /DestinationImageFile:"$tempFile" /Compress:max /CheckIntegrity
+              if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image failed for $wimFile (Index $idx)." }
+            }
+
+            Move-Item -Path $tempFile -Destination $wimFile -Force
           }
 
-          if ("${{ github.event.inputs.keep_iot_only }}" -eq "true") {
-            Write-Host "Trimming install.wim to Index 2 (IoT Enterprise LTSC)..."
-            $wimPath = "D:\work\iso\sources\install.wim"
-            dism.exe /English /Export-Image /SourceImageFile:"$wimPath" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
-            if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image for Index 2 failed." }
-            Move-Item -Path "D:\work\install_iot.wim" -Destination $wimPath -Force
+          $results = @()
+
+          foreach ($mode in @("trim_true", "trim_false")) {
+            Write-Host "=========================================="
+            Write-Host "Starting Build Mode: $mode"
+            Write-Host "=========================================="
+
+            foreach ($dir in @("D:\work\iso", "D:\work\temp", "D:\work\mount", "D:\work\mountre")) {
+              if (Test-Path $dir) { Remove-Item -Path $dir -Recurse -Force }
+              New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+
+            7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "7z extraction failed ($mode)." }
+
+            Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
+              $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+            }
+
+            $installWim = "D:\work\iso\sources\install.wim"
+            $bootWim = "D:\work\iso\sources\boot.wim"
+
+            if ($mode -eq "trim_true") {
+              Write-Host "Trimming install.wim to Index 2 (IoT Enterprise LTSC)..."
+              dism.exe /English /Export-Image /SourceImageFile:"$installWim" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
+              if ($LASTEXITCODE -ne 0) { throw "DISM trim failed." }
+              Move-Item -Path "D:\work\install_iot.wim" -Destination $installWim -Force
+              $label = "Trim = TRUE (Index 2 IoT Only)"
+              $isoName = "Test_IoT_Only.iso"
+            } else {
+              Remove-Item -Path "D:\work\base.iso" -Force
+              $label = "Trim = FALSE (Dual Index)"
+              $isoName = "Test_Dual_Index.iso"
+            }
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            Push-Location "D:\work\W10UI"
+            cmd.exe /c "W10UI.cmd"
+            Pop-Location
+
+            Compress-Wim $installWim "D:\work\install_max.wim"
+            Compress-Wim $bootWim "D:\work\boot_max.wim"
+
+            $finalIsoPath = "D:\work\out\$isoName"
+            $etfsboot = "D:\work\iso\boot\etfsboot.com"
+            $efisys = "D:\work\iso\efi\microsoft\boot\efisys.bin"
+
+            & "D:\work\W10UI\oscdimg.exe" -m -o -u2 -udfver102 "-bootdata:2#p0,e,b$etfsboot#pEF,e,b$efisys" "D:\work\iso" "$finalIsoPath"
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $finalIsoPath)) {
+              throw "oscdimg.exe failed ($mode)."
+            }
+            $sw.Stop()
+
+            $isoItem = Get-Item $finalIsoPath
+            $installSizeGB = [math]::Round((Get-Item $installWim).Length / 1GB, 3)
+            $bootSizeMB = [math]::Round((Get-Item $bootWim).Length / 1MB, 1)
+
+            $results += [PSCustomObject]@{
+              Mode       = $label
+              File       = $isoName
+              IsoGB      = [math]::Round($isoItem.Length / 1GB, 3)
+              IsoMiB     = [math]::Round($isoItem.Length / 1MB, 2)
+              InstallGB  = $installSizeGB
+              BootMB     = $bootSizeMB
+              Minutes    = [math]::Round($sw.Elapsed.TotalMinutes, 1)
+            }
           }
 
-      - name: Run W10UI slipstream, compress WIMs, and build ISO
-        shell: pwsh
-        run: |
-          Push-Location "D:\work\W10UI"
-          cmd.exe /c "W10UI.cmd"
-          Pop-Location
-
-          # Re-export install.wim and boot.wim with /Compress:max AFTER slipstreaming
-          $installWim = "D:\work\iso\sources\install.wim"
-          $bootWim = "D:\work\iso\sources\boot.wim"
-
-          Write-Host "Compressing updated install.wim with /Compress:max..."
-          dism.exe /English /Export-Image /SourceImageFile:"$installWim" /All /DestinationImageFile:"D:\work\install_max.wim" /Compress:max /CheckIntegrity
-          if ($LASTEXITCODE -ne 0) { throw "Post-W10UI install.wim Export-Image failed." }
-          Move-Item -Path "D:\work\install_max.wim" -Destination $installWim -Force
-
-          Write-Host "Compressing updated boot.wim with /Compress:max..."
-          dism.exe /English /Export-Image /SourceImageFile:"$bootWim" /All /DestinationImageFile:"D:\work\boot_max.wim" /Compress:max /CheckIntegrity
-          if ($LASTEXITCODE -ne 0) { throw "Post-W10UI boot.wim Export-Image failed." }
-          Move-Item -Path "D:\work\boot_max.wim" -Destination $bootWim -Force
-
-          # Build bootable ISO using oscdimg.exe with -o optimization
-          $cleanName = ("${{ github.event.inputs.output_name }}".Trim() -replace '\.iso$', '') -replace '[^a-zA-Z0-9._-]', '_'
-          $finalIso = "D:\work\out\$($cleanName).iso"
-          $etfsboot = "D:\work\iso\boot\etfsboot.com"
-          $efisys = "D:\work\iso\efi\microsoft\boot\efisys.bin"
-
-          & "D:\work\W10UI\oscdimg.exe" -m -o -u2 -udfver102 "-bootdata:2#p0,e,b$etfsboot#pEF,e,b$efisys" "D:\work\iso" "$finalIso"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $finalIso)) {
-            throw "oscdimg.exe failed to create ISO."
+          "### Side-by-Side Test Comparison (Base ISO: $env:BASE_ISO_SIZE_GB GB)" >> $env:GITHUB_STEP_SUMMARY
+          "| Mode | Output ISO | Final ISO Size | `install.wim` | `boot.wim` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
+          "| :--- | :--- | :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($r in $results) {
+            "| $($r.Mode) | ``$($r.File)`` | **$($r.IsoGB) GB** ($($r.IsoMiB) MiB) | $($r.InstallGB) GB | $($r.BootMB) MB | $($r.Minutes) min |" >> $env:GITHUB_STEP_SUMMARY
           }
-
-      - name: Inspect final ISO size and WIM info (No Upload)
-        shell: pwsh
-        run: |
-          $cleanName = ("${{ github.event.inputs.output_name }}".Trim() -replace '\.iso$', '') -replace '[^a-zA-Z0-9._-]', '_'
-          $finalIso = Get-Item "D:\work\out\$($cleanName).iso"
-
-          $isoBytes = $finalIso.Length
-          $isoGB = [math]::Round($isoBytes / 1GB, 3)
-          $isoMiB = [math]::Round($isoBytes / 1MB, 2)
-          $isoSha = (Get-FileHash -Path $finalIso.FullName -Algorithm SHA256).Hash.ToLower()
-
-          7z l "$($finalIso.FullName)" "sources\*.wim"
-          $wimInfo = dism.exe /English /Get-WimInfo /WimFile:"D:\work\iso\sources\install.wim"
-          $wimInfo
-
-          "### Test Build Results (No Upload)" >> $env:GITHUB_STEP_SUMMARY
-          "- **Output Filename:** ``$($finalIso.Name)``" >> $env:GITHUB_STEP_SUMMARY
-          "- **Final ISO Size:** **$isoGB GB** ($isoMiB MiB / ``$isoBytes`` bytes)" >> $env:GITHUB_STEP_SUMMARY
-          "- **Base ISO Size:** $env:BASE_ISO_SIZE_GB GB (``$env:BASE_ISO_SHA256``)" >> $env:GITHUB_STEP_SUMMARY
-          "- **Output SHA-256:** ``$isoSha``" >> $env:GITHUB_STEP_SUMMARY
-          "" >> $env:GITHUB_STEP_SUMMARY
-          "#### WIM Edition Info" >> $env:GITHUB_STEP_SUMMARY
-          "``````text" >> $env:GITHUB_STEP_SUMMARY
-          ($wimInfo -join "`n") >> $env:GITHUB_STEP_SUMMARY
-          "``````" >> $env:GITHUB_STEP_SUMMARY
