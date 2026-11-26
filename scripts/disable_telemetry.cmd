@@ -490,5 +490,4 @@ rem == Delete mount and temp folders ==
 rd /s /q mount
 rd /s /q temp
 
-pause
 exit
