@@ -1,4 +1,4 @@
-name: Test Slipstream Windows 10 IoT LTSC 2021 (Compare Both)
+name: Test Slipstream Windows 10 IoT LTSC 2021
 
 on:
   workflow_dispatch:
@@ -13,9 +13,18 @@ on:
         description: Optional direct download URL for .NET Framework Update (.msu / .cab / .exe)
         required: false
         default: ''
+      trim_mode:
+        description: WIM index mode (trim_iot = keep Index 2 IoT only, skip_trim = keep all indexes, compare_both = run both)
+        type: choice
+        required: true
+        default: 'trim_iot'
+        options:
+          - trim_iot
+          - skip_trim
+          - compare_both
 
 jobs:
-  compare-builds:
+  build-iso:
     runs-on: windows-latest
     timeout-minutes: 180
 
@@ -50,7 +59,7 @@ jobs:
           $ini = $ini -replace '^ISO\s*=.*', 'ISO           =0'
           Set-Content -Path $iniPath -Value $ini
 
-      - name: Download and verify base ISO + updates once to D:\work
+      - name: Download and verify base ISO + updates to D:\work
         shell: pwsh
         run: |
           choco install aria2 -y --no-progress | Out-Null
@@ -114,12 +123,12 @@ jobs:
           Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
           Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
 
-      - name: Run Both Builds (Trimmed Index 2 vs Dual Index) and Compare
+      - name: Build Slipstreamed & Hardened ISO
         shell: pwsh
         run: |
           function Compress-Wim($wimFile, $tempFile) {
             $info = dism.exe /English /Get-WimInfo /WimFile:"$wimFile"
-            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups.Value }
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
             if (-not $indexes) { throw "Could not detect indexes in $wimFile" }
 
             if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
@@ -133,9 +142,11 @@ jobs:
             Move-Item -Path $tempFile -Destination $wimFile -Force
           }
 
+          $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
+          $modes = if ($selectedMode -eq "compare_both") { @("trim_iot", "skip_trim") } else { @($selectedMode) }
           $results = @()
 
-          foreach ($mode in @("trim_true", "trim_false")) {
+          foreach ($mode in $modes) {
             Write-Host "=========================================="
             Write-Host "Starting Build Mode: $mode"
             Write-Host "=========================================="
@@ -148,6 +159,11 @@ jobs:
             7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "7z extraction failed ($mode)." }
 
+            # Delete base.iso on the final iteration to maximize free space on D:\
+            if ($mode -eq $modes[-1]) {
+              Remove-Item -Path "D:\work\base.iso" -Force -ErrorAction SilentlyContinue
+            }
+
             Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
               $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
             }
@@ -155,24 +171,38 @@ jobs:
             $installWim = "D:\work\iso\sources\install.wim"
             $bootWim = "D:\work\iso\sources\boot.wim"
 
-            if ($mode -eq "trim_true") {
+            if ($mode -eq "trim_iot") {
               Write-Host "Trimming install.wim to Index 2 (IoT Enterprise LTSC)..."
               dism.exe /English /Export-Image /SourceImageFile:"$installWim" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
               if ($LASTEXITCODE -ne 0) { throw "DISM trim failed." }
               Move-Item -Path "D:\work\install_iot.wim" -Destination $installWim -Force
               $label = "Trim = TRUE (Index 2 IoT Only)"
-              $isoName = "Test_IoT_Only.iso"
+              $isoName = "Win10_IoT_LTSC_2021_x64.iso"
             } else {
-              Remove-Item -Path "D:\work\base.iso" -Force
-              $label = "Trim = FALSE (Dual Index)"
-              $isoName = "Test_Dual_Index.iso"
+              Write-Host "Skipping index trim (keeping all editions in install.wim)..."
+              $label = "Trim = FALSE (All Indexes)"
+              $isoName = "Win10_LTSC_2021_DualIndex_x64.iso"
             }
 
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+            # 1. Slipstream LCU and .NET updates via W10UI
             Push-Location "D:\work\W10UI"
             cmd.exe /c "W10UI.cmd"
+            if ($LASTEXITCODE -ne 0) { throw "W10UI.cmd failed ($mode)." }
             Pop-Location
 
+            # 2. Apply telemetry & hardening tweaks as TrustedInstaller
+            Write-Host "Running disable_telemetry.cmd as TrustedInstaller ($mode)..."
+            cmd.exe /c "`"$env:GITHUB_WORKSPACE\scripts\disable_telemetry.cmd`" $installWim"
+            if ($LASTEXITCODE -ne 0) {
+              throw "disable_telemetry.cmd failed ($mode) with exit code $LASTEXITCODE."
+            }
+
+            # 3. Copy autounattend.xml to ISO root
+            Copy-Item -Path "$env:GITHUB_WORKSPACE\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
+
+            # 4. Max-compress WIMs and build bootable ISO
             Compress-Wim $installWim "D:\work\install_max.wim"
             Compress-Wim $bootWim "D:\work\boot_max.wim"
 
@@ -201,7 +231,7 @@ jobs:
             }
           }
 
-          "### Side-by-Side Test Comparison (Base ISO: $env:BASE_ISO_SIZE_GB GB | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
+          "### Build Summary (Base ISO: $env:BASE_ISO_SIZE_GB GB | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
           "| Mode | Output ISO | Final ISO Size | `install.wim` | `boot.wim` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
           "| :--- | :--- | :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
           foreach ($r in $results) {
