@@ -30,7 +30,6 @@ on:
         options:
           - esd
           - wim
-          
 
 jobs:
   build-iso:
@@ -158,16 +157,13 @@ jobs:
           }
 
           $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
-          $imageFormat = "${{ github.event.inputs.image_format }}".Trim().ToLower() # <-- ADD THIS
-
-
-          $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
+          $imageFormat = "${{ github.event.inputs.image_format }}".Trim().ToLower()
           $modes = if ($selectedMode -eq "compare_both") { @("trim_iot", "skip_trim") } else { @($selectedMode) }
           $results = @()
 
           foreach ($mode in $modes) {
             Write-Host "=========================================="
-            Write-Host "Starting Build Mode: $mode"
+            Write-Host "Starting Build Mode: $mode | Format: $imageFormat"
             Write-Host "=========================================="
 
             foreach ($dir in @("D:\work\iso", "D:\work\temp", "D:\work\mount", "D:\work\mountre")) {
@@ -221,7 +217,7 @@ jobs:
             # 3. Copy autounattend.xml to ISO root
             Copy-Item -Path "D:\work\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
 
-             # 4. Compress install image (ESD or max WIM), max-compress boot.wim, and build ISO
+            # 4. Compress install image (ESD or max WIM), max-compress boot.wim, and build ISO
             if ($imageFormat -eq "esd") {
               $finalInstallImage = "D:\work\iso\sources\install.esd"
               Compress-Image $installWim $finalInstallImage "recovery"
@@ -246,7 +242,7 @@ jobs:
             $sw.Stop()
 
             $isoItem = Get-Item $finalIsoPath
-            $installSizeGB = [math]::Round((Get-Item $finalInstallImage).Length / 1GB, 3) # <-- CHANGED $installWim to $finalInstallImage
+            $installSizeGB = [math]::Round((Get-Item $finalInstallImage).Length / 1GB, 3)
             $bootSizeMB = [math]::Round((Get-Item $bootWim).Length / 1MB, 1)
 
             $results += [PSCustomObject]@{
@@ -260,8 +256,8 @@ jobs:
             }
           }
 
-          "### Build Summary (Base ISO: $env:BASE_ISO_SIZE_GB GB | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
-          "| Mode | Output ISO | Final ISO Size | `install.wim` | `boot.wim` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
+          "### Build Summary (Base ISO: $env:BASE_ISO_SIZE_GB GB | Format: $($imageFormat.ToUpper()) | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
+          "| Mode | Output ISO | Final ISO Size | ``install.$imageFormat`` | ``boot.wim`` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
           "| :--- | :--- | :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
           foreach ($r in $results) {
             "| $($r.Mode) | ``$($r.File)`` | **$($r.IsoGB) GB** ($($r.IsoMiB) MiB) | $($r.InstallGB) GB | $($r.BootMB) MB | $($r.Minutes) min |" >> $env:GITHUB_STEP_SUMMARY
