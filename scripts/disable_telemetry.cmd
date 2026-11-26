@@ -1,41 +1,79 @@
 @echo off
 rem ========================================================================================================================
-rem == Version: disable_telemetry_10.05.2026 (Custom LTSC / Schneegans Edition) ==
+rem == Version: disable_telemetry_10.05.2026 (CI / LTSC / Schneegans Edition) ==
 rem == Base Author: freddie-o ==
 rem == Base Source: https://forums.mydigitallife.net/threads/repo-windows-10-telemetry-repository.63874/page-66#post-1686849 ==
-rem == Customized: Preserves Defender AV, Firewall, Windows Update Engine (for Schneegans PauseWindowsUpdate), ==
+rem == Customized: Synchronous headless TrustedInstaller elevation, multi-index loop, no Export-Image, no pause. ==
+rem ==             Preserves Defender AV, Firewall, Windows Update Engine (for Schneegans PauseWindowsUpdate), ==
 rem ==             Local Search (Delayed Start), WebView2, OOBE/Client.CBS, DusmSvc, and Debian/OpenDNS NCSI. ==
 rem ========================================================================================================================
 
 setlocal EnableExtensions
 
+set "WIM_FILE=%~1"
+if "%WIM_FILE%"=="" set "WIM_FILE=%~dp0install.wim"
+
 rem == Ensuring Administrator privileges needed to transition from SYSTEM to TrustedInstaller ==
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-    exit /b
+    if "%~1"=="" (
+        powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -Wait"
+    ) else (
+        powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%~1' -Verb RunAs -Wait"
+    )
+    exit /b %errorlevel%
 )
 
-rem == Elevate to TrustedInstaller ==
+rem == Elevate to TrustedInstaller (Synchronous & Hidden for CI/Automation) ==
 whoami /groups | find "S-1-5-80-956008885" >nul 2>&1
 if %errorlevel% neq 0 (
-    powershell -ExecutionPolicy Bypass -File "%~dp0Elevate_as_TI.ps1" -FilePath "%~f0" -WorkingDirectory "%~dp0."
-    exit /b
+    if "%~1"=="" (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Elevate_as_TI.ps1" -FilePath "%~f0" -WorkingDirectory "%~dp0." -Hidden -Wait -PassThru
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Elevate_as_TI.ps1" -FilePath "%~f0" -Arguments "%~1" -WorkingDirectory "%~dp0." -Hidden -Wait -PassThru
+    )
+    exit /b %errorlevel%
 )
 
 cd /d "%~dp0"
 
-rem == create mount and temp folders ==
-mkdir mount
-mkdir temp
+if not exist "%WIM_FILE%" (
+    echo [ERROR] Target WIM file not found: "%WIM_FILE%"
+    exit /b 1
+)
 
-rem == mount install.wim ==
-dism /mount-image /imagefile:install.wim /index:1 /mountdir:mount
+echo [INFO] Target WIM: "%WIM_FILE%"
 
-rem == offline verification scan to check component store for file corruption ==
-dism /scratchdir:temp /Image:mount /Cleanup-Image /ScanHealth
+for /f "tokens=3" %%I in ('dism /English /Get-WimInfo /WimFile:"%WIM_FILE%" ^| findstr /b /c:"Index :"') do (
+    call :ProcessIndex %%I
+    if errorlevel 1 exit /b 1
+)
 
-rem == load registry hives to disable telemetry ==
+echo [INFO] All indexes processed successfully.
+exit /b 0
+
+:ProcessIndex
+set "WIM_INDEX=%~1"
+echo ============================================================================
+echo [INFO] Servicing "%WIM_FILE%" - Index %WIM_INDEX%
+echo ============================================================================
+
+if exist "mount" rd /s /q "mount"
+if exist "temp" rd /s /q "temp"
+mkdir "mount"
+mkdir "temp"
+
+rem == Mount install.wim ==
+dism /English /mount-image /imagefile:"%WIM_FILE%" /index:%WIM_INDEX% /mountdir:mount
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to mount index %WIM_INDEX%.
+    exit /b %errorlevel%
+)
+
+rem == Offline verification scan to check component store for file corruption ==
+dism /English /scratchdir:temp /Image:mount /Cleanup-Image /ScanHealth
+
+rem == Load SOFTWARE registry hive ==
 reg load HKLM\SOFTHIVE mount\Windows\System32\config\SOFTWARE
 
 rem == Disable Windows telemetry, diagnostics, and feedback ==
@@ -318,6 +356,8 @@ reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\GameDVR" /v "AppCaptureEnabled
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\GameDVR" /v "AllowGameBar" /t REG_DWORD /d "0" /f
 
 reg unload HKLM\SOFTHIVE
+
+rem == Load SYSTEM registry hive ==
 reg load HKLM\SYSHIVE mount\Windows\System32\config\SYSTEM
 
 rem == Configure NCSI to use Debian HTTP probe & OpenDNS DNS probe, and disable passive polling ==
@@ -391,6 +431,8 @@ reg delete "HKLM\SYSHIVE\ControlSet001\Control\WMI\Autologger\WdiContextLog" /f
 reg delete "HKLM\SYSHIVE\ControlSet001\Control\WMI\Autologger\WFP-IPsec Trace" /f
 
 reg unload HKLM\SYSHIVE
+
+rem == Load Default User registry hive ==
 reg load HKLM\NTUSER mount\Users\Default\NTUSER.DAT
 
 rem == Disable Copilot (if present) ==
@@ -467,27 +509,26 @@ if exist "mount\Program Files (x86)\Microsoft\Edge" (
 )
 
 rem == Disable Windows features with telemetry (SearchEngine-Client-Package & Windows-Defender-Default-Definitions preserved) ==
-dism /scratchdir:temp /image:mount /disable-feature /featurename:Internet-Explorer-Optional-amd64
-dism /scratchdir:temp /image:mount /disable-feature /featurename:MediaPlayback
-dism /scratchdir:temp /image:mount /disable-feature /featurename:WindowsMediaPlayer
+dism /English /scratchdir:temp /image:mount /disable-feature /featurename:Internet-Explorer-Optional-amd64
+dism /English /scratchdir:temp /image:mount /disable-feature /featurename:MediaPlayback
+dism /English /scratchdir:temp /image:mount /disable-feature /featurename:WindowsMediaPlayer
 
 rem == Remove capabilities with telemetry ==
-dism /scratchdir:temp /image:mount /Remove-Capability /CapabilityName:Browser.InternetExplorer~~~~0.0.11.0
-dism /scratchdir:temp /image:mount /Remove-Capability /CapabilityName:Media.WindowsMediaPlayer~~~~0.0.12.0
+dism /English /scratchdir:temp /image:mount /Remove-Capability /CapabilityName:Browser.InternetExplorer~~~~0.0.11.0
+dism /English /scratchdir:temp /image:mount /Remove-Capability /CapabilityName:Media.WindowsMediaPlayer~~~~0.0.12.0
 
 rem == Offline verification scan to check component store for file corruption ==
-dism /scratchdir:temp /Image:mount /Cleanup-Image /ScanHealth
+dism /English /scratchdir:temp /Image:mount /Cleanup-Image /ScanHealth
 
 rem == Commit changes and unmount install.wim ==
-dism /unmount-image /mountdir:mount /commit
-
-rem == Rebuild install.wim ==
-dism /Export-Image /SourceImageFile:install.wim /SourceIndex:1 /DestinationImageFile:install2.wim /checkintegrity
-del /f /q install.wim
-ren install2.wim install.wim
+dism /English /unmount-image /mountdir:mount /commit
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to commit and unmount index %WIM_INDEX%.
+    exit /b %errorlevel%
+)
 
 rem == Delete mount and temp folders ==
-rd /s /q mount
-rd /s /q temp
+rd /s /q "mount"
+rd /s /q "temp"
 
-exit
+exit /b 0
