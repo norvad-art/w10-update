@@ -8,7 +8,7 @@ rem ==             Preserves Defender AV, Firewall, Windows Update Engine (for S
 rem ==             Local Search (Delayed Start), WebView2, OOBE/Client.CBS, DusmSvc, and Debian/OpenDNS NCSI. ==
 rem ========================================================================================================================
 
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "WIM_FILE=%~1"
 if "%WIM_FILE%"=="" set "WIM_FILE=%~dp0install.wim"
@@ -21,7 +21,7 @@ if %errorlevel% neq 0 (
     ) else (
         powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%~1' -Verb RunAs -Wait"
     )
-    exit /b %errorlevel%
+    exit /b !errorlevel!
 )
 
 rem == Elevate to TrustedInstaller (Synchronous & Hidden for CI/Automation) ==
@@ -32,7 +32,7 @@ if %errorlevel% neq 0 (
     ) else (
         powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Elevate_as_TI.ps1" -FilePath "%~f0" -Arguments "%~1" -WorkingDirectory "%~dp0." -Hidden -Wait -PassThru
     )
-    exit /b %errorlevel%
+    exit /b !errorlevel!
 )
 
 cd /d "%~dp0"
