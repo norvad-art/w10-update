@@ -145,7 +145,7 @@ jobs:
         run: |
           function Compress-Image($sourceFile, $destFile, $compression) {
             $info = dism.exe /English /Get-WimInfo /WimFile:"$sourceFile"
-            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups.Value }
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
             if (-not $indexes) { throw "Could not detect indexes in $sourceFile" }
 
             if (Test-Path $destFile) { Remove-Item $destFile -Force }
