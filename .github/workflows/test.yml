@@ -22,6 +22,15 @@ on:
           - trim_iot
           - skip_trim
           - compare_both
+      image_format:
+        description: Install image format (esd = LZMS solid compression, wim = max LZX compression)
+        type: choice
+        required: true
+        default: 'esd'
+        options:
+          - esd
+          - wim
+          
 
 jobs:
   build-iso:
@@ -134,21 +143,23 @@ jobs:
       - name: Build Slipstreamed & Hardened ISO
         shell: pwsh
         run: |
-          function Compress-Wim($wimFile, $tempFile) {
-            $info = dism.exe /English /Get-WimInfo /WimFile:"$wimFile"
-            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
-            if (-not $indexes) { throw "Could not detect indexes in $wimFile" }
+          function Compress-Image($sourceFile, $destFile, $compression) {
+            $info = dism.exe /English /Get-WimInfo /WimFile:"$sourceFile"
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups.Value }
+            if (-not $indexes) { throw "Could not detect indexes in $sourceFile" }
 
-            if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+            if (Test-Path $destFile) { Remove-Item $destFile -Force }
 
             foreach ($idx in $indexes) {
-              Write-Host "Exporting index $idx of $(Split-Path $wimFile -Leaf) with /Compress:max..."
-              dism.exe /English /Export-Image /SourceImageFile:"$wimFile" /SourceIndex:$idx /DestinationImageFile:"$tempFile" /Compress:max /CheckIntegrity
-              if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image failed for $wimFile (Index $idx)." }
+              Write-Host "Exporting index $idx of $(Split-Path $sourceFile -Leaf) with /Compress:$compression..."
+              dism.exe /English /Export-Image /SourceImageFile:"$sourceFile" /SourceIndex:$idx /DestinationImageFile:"$destFile" /Compress:$compression /CheckIntegrity
+              if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image failed for $sourceFile (Index $idx)." }
             }
-
-            Move-Item -Path $tempFile -Destination $wimFile -Force
           }
+
+          $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
+          $imageFormat = "${{ github.event.inputs.image_format }}".Trim().ToLower() # <-- ADD THIS
+
 
           $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
           $modes = if ($selectedMode -eq "compare_both") { @("trim_iot", "skip_trim") } else { @($selectedMode) }
@@ -210,9 +221,19 @@ jobs:
             # 3. Copy autounattend.xml to ISO root
             Copy-Item -Path "D:\work\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
 
-            # 4. Max-compress WIMs and build bootable ISO
-            Compress-Wim $installWim "D:\work\install_max.wim"
-            Compress-Wim $bootWim "D:\work\boot_max.wim"
+             # 4. Compress install image (ESD or max WIM), max-compress boot.wim, and build ISO
+            if ($imageFormat -eq "esd") {
+              $finalInstallImage = "D:\work\iso\sources\install.esd"
+              Compress-Image $installWim $finalInstallImage "recovery"
+              Remove-Item -Path $installWim -Force
+            } else {
+              $finalInstallImage = $installWim
+              Compress-Image $installWim "D:\work\install_max.wim" "max"
+              Move-Item -Path "D:\work\install_max.wim" -Destination $installWim -Force
+            }
+
+            Compress-Image $bootWim "D:\work\boot_max.wim" "max"
+            Move-Item -Path "D:\work\boot_max.wim" -Destination $bootWim -Force
 
             $finalIsoPath = "D:\work\out\$isoName"
             $etfsboot = "D:\work\iso\boot\etfsboot.com"
@@ -225,7 +246,7 @@ jobs:
             $sw.Stop()
 
             $isoItem = Get-Item $finalIsoPath
-            $installSizeGB = [math]::Round((Get-Item $installWim).Length / 1GB, 3)
+            $installSizeGB = [math]::Round((Get-Item $finalInstallImage).Length / 1GB, 3) # <-- CHANGED $installWim to $finalInstallImage
             $bootSizeMB = [math]::Round((Get-Item $bootWim).Length / 1MB, 1)
 
             $results += [PSCustomObject]@{
