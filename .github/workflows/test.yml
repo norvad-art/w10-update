@@ -32,7 +32,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare D:\work directories and copy W10UI
+      - name: Prepare D:\work directories and copy W10UI & scripts
         shell: pwsh
         run: |
           $dirs = @(
@@ -41,16 +41,24 @@ jobs:
             "D:\work\mount",
             "D:\work\mountre",
             "D:\work\out",
-            "D:\work\W10UI"
+            "D:\work\W10UI",
+            "D:\work\scripts"
           )
           foreach ($d in $dirs) {
             New-Item -ItemType Directory -Path $d -Force | Out-Null
           }
 
           Copy-Item -Path "$env:GITHUB_WORKSPACE\W10UI\*" -Destination "D:\work\W10UI" -Recurse -Force
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\scripts\*" -Destination "D:\work\scripts" -Recurse -Force
 
           if (-not (Test-Path "D:\work\W10UI\oscdimg.exe")) {
             throw "oscdimg.exe not found in W10UI folder."
+          }
+
+          foreach ($reqFile in @("disable_telemetry.cmd", "Elevate_as_TI.ps1", "autounattend.xml")) {
+            if (-not (Test-Path "D:\work\scripts\$reqFile")) {
+              throw "$reqFile not found in scripts folder."
+            }
           }
 
           $iniPath = "D:\work\W10UI\W10UI.ini"
@@ -194,13 +202,13 @@ jobs:
 
             # 2. Apply telemetry & hardening tweaks as TrustedInstaller
             Write-Host "Running disable_telemetry.cmd as TrustedInstaller ($mode)..."
-            cmd.exe /c "`"$env:GITHUB_WORKSPACE\scripts\disable_telemetry.cmd`" $installWim"
+            cmd.exe /c "D:\work\scripts\disable_telemetry.cmd $installWim"
             if ($LASTEXITCODE -ne 0) {
               throw "disable_telemetry.cmd failed ($mode) with exit code $LASTEXITCODE."
             }
 
             # 3. Copy autounattend.xml to ISO root
-            Copy-Item -Path "$env:GITHUB_WORKSPACE\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
+            Copy-Item -Path "D:\work\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
 
             # 4. Max-compress WIMs and build bootable ISO
             Compress-Wim $installWim "D:\work\install_max.wim"
