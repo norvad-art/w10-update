@@ -94,6 +94,11 @@ rem == Disable Copilot (if present) ==
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\WindowsCopilot" /v "AllowWindowsCopilot" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\WindowsCopilot" /v "TurnOffWindowsCopilot" /t REG_DWORD /d "1" /f
 
+rem == Disable CEIP ==
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\System" /v "EnableSmartScreen" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\DataCollection" /v "MaxTelemetryAllowed" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\AppV\CEIP" /v "CEIPEnable" /t REG_DWORD /d "0" /f
+
 rem == Keep Windows Defender AV enabled, disable cloud telemetry, sample submission & MRT reporting ==
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows Defender\Reporting" /v "WppTracingLevel" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows Defender\Reporting" /v "DisableGenericRePorts" /t REG_DWORD /d "1" /f
@@ -104,6 +109,8 @@ reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows Defender\Spynet" /v "DisableBl
 reg add "HKLM\SOFTHIVE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-Windows Defender/Operational" /v "Enabled" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\MRT" /v "DontReportInfectionInformation" /t REG_DWORD /d "1" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\MRT" /v "DontOfferThroughWUAU" /t REG_DWORD /d "1" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\Network Protection" /v "EnableNetworkProtection" /t REG_DWORD /d "0" /f
+
 
 rem == Disable SmartScreen ==
 reg add "HKLM\SOFTHIVE\Microsoft\Windows\CurrentVersion\Explorer" /v "SmartScreenEnabled" /t REG_SZ /d "Off" /f
@@ -118,6 +125,8 @@ reg add "HKLM\SOFTHIVE\Policies\Microsoft\Edge" /v "PersonalizationReportingEnab
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Edge" /v "SendSiteInfoToImproveServices" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Edge" /v "UserFeedbackAllowed" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Edge" /v "EdgeAssetDeliveryServiceEnabled" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\EdgeUpdate" /v "Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\EdgeUpdate" /v "Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" /t REG_DWORD /d "0" /f
 
 rem == Keep Windows Update engine unlocked for Schneegans PauseWindowsUpdate; disable P2P Delivery Optimization & Reserved Storage ==
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\DeliveryOptimization" /v "DODownloadMode" /t REG_DWORD /d "99" /f
@@ -138,6 +147,15 @@ reg add "HKLM\SOFTHIVE\Policies\Microsoft\SQMClient\Windows" /v "CEIPEnable" /t 
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\WMDRM" /v "DisableOnline" /t REG_DWORD /d "1" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\Windows Feeds" /v "EnableFeeds" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\OneDrive" /v "DisableFileSyncNGSC" /t REG_DWORD /d "1" /f
+
+rem == Delete additional tasks ==
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\CloudExperienceHost\CreateObjectTask" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\FileHistory" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\Management\Provisioning" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\MemoryDiagnostic" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\RAC" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\Registry" /f
+reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\Work Folders" /f
 
 rem == Prevent computer from sending data to Microsoft regarding its activation state ==
 reg add "HKLM\SOFTHIVE\Classes\AppID\slui.exe" /v "NoGenTicket" /t REG_DWORD /d "1" /f
@@ -177,6 +195,7 @@ reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache
 reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\Windows Error Reporting" /f
 reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\Windows Filtering Platform" /f
 reg delete "HKLM\SOFTHIVE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\XblGameSave" /f
+
 
 rem == Disable Cortana & web/cloud search permissions (keep local search enabled) ==
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\Windows Search" /v "AllowCortana" /t REG_DWORD /d "0" /f
@@ -323,6 +342,9 @@ reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\System" /v "EnableAppUriHandle
 rem == Prevent SmartScreen SystemApp from deploying (CloudExperienceHost, Search, SecHealthUI & Client.CBS preserved) ==
 for %%i in (
     Microsoft.Windows.AppRep.ChxApp
+    Microsoft.Windows.ContentDeliveryManager
+    Microsoft.BingSearch
+    Microsoft.Windows.CallingShellApp
 ) do (
     for /f "tokens=*" %%a in ('reg query "HKLM\SOFTHIVE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications" /f %%i /k ^| findstr /i "InboxApplications"') do (
         if not errorlevel 1 (
@@ -354,6 +376,18 @@ rem == Disable GameDVR, game capture, and Xbox Game Bar ==
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\GameDVR" /v "AllowGameDVR" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\GameDVR" /v "AppCaptureEnabled" /t REG_DWORD /d "0" /f
 reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\GameDVR" /v "AllowGameBar" /t REG_DWORD /d "0" /f
+
+rem == Hide Hibernate option, Disable A/B test,  disable tamper protection, disable cloud font download ==
+reg add "HKLM\SOFTHIVE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings" /v "ShowHibernateOption" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Microsoft\Windows Defender\Features" /v "TamperProtection" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\PreviewBuilds" /v "AllowExperimentation" /t REG_DWORD /d "0" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\System" /v "EnableFontProviders" /t REG_DWORD /d "0" /f
+
+rem ==  Disable "Tailored Experiences" & Diagnostic Data Viewer ==
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\DataCollection" /v "DisableDiagnosticDataViewer" /t REG_DWORD /d "1" /f
+reg add "HKLM\SOFTHIVE\Policies\Microsoft\Windows\CloudContent" /v "DisableTailoredExperiencesWithDiagnosticData" /t REG_DWORD /d "1" /f
+
+
 
 reg unload HKLM\SOFTHIVE
 
@@ -419,6 +453,17 @@ reg delete "HKLM\SYSHIVE\ControlSet001\Services\xboxgip" /f
 reg delete "HKLM\SYSHIVE\ControlSet001\Services\XboxGipSvc" /f
 reg delete "HKLM\SYSHIVE\ControlSet001\Services\XboxNetApiSvc" /f
 
+rem == Extras ==
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\AarSvc" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\AJRouter" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\MessagingService" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\RemoteRegistry" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\SEMgrSvc" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\TroubleshootingSvc" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\WMPNetworkSvc" /f
+reg delete "HKLM\SYSHIVE\ControlSet001\Services\RpcLocator" /f
+
+
 rem == Delete autologger telemetry ==
 reg delete "HKLM\SYSHIVE\ControlSet001\Control\WMI\Autologger\AITEventLog" /f
 reg delete "HKLM\SYSHIVE\ControlSet001\Control\WMI\Autologger\CloudExperienceHostOobe" /f
@@ -463,6 +508,15 @@ reg add "HKLM\NTUSER\SOFTWARE\Policies\Microsoft\Control Panel\International" /v
 reg add "HKLM\NTUSER\SOFTWARE\Policies\Microsoft\Control Panel\International" /v "TurnOffOfferTextPredictions" /t REG_DWORD /d "1" /f
 reg add "HKLM\NTUSER\SOFTWARE\Policies\Microsoft\Clipboard" /v "EnableClipboardHistory" /t REG_DWORD /d "0" /f
 reg add "HKLM\NTUSER\SOFTWARE\Policies\Microsoft\Clipboard" /v "EnableCloudClipboard" /t REG_DWORD /d "0" /f
+
+rem == Disable Meet Now, recent jump lists shows all System Tray icons, disable lockscreen connection ==
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" /v "HideSCAMeetNow" /t REG_DWORD /d "1" /f
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "Start_TrackDocs" /t REG_DWORD /d "0" /f
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" /v "EnableAutoTray" /t REG_DWORD /d "0" /f
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v "RotatingLockScreenEnabled" /t REG_DWORD /d "0" /f
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v "RotatingLockScreenOverlayEnabled" /t REG_DWORD /d "0" /f
+reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v "SubscribedContent-338387Enabled" /t REG_DWORD /d "0" /f
+
 
 rem == Disable Explorer telemetry, advertising info, recent documents and app tracking (Indexing Options kept visible) ==
 reg add "HKLM\NTUSER\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo" /v "Enabled" /t REG_DWORD /d "0" /f
