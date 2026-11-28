@@ -1,0 +1,289 @@
+name: Test Slipstream Windows 10 IoT LTSC 2021
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: Direct URL, .torrent URL, or magnet link for en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
+        required: true
+      lcu_url:
+        description: Direct download URL for Latest Cumulative Update (.msu / .cab / .exe)
+        required: true
+      dotnet_url:
+        description: Optional direct download URL for .NET Framework Update (.msu / .cab / .exe)
+        required: false
+        default: ''
+      trim_mode:
+        description: WIM index mode (trim_iot = keep Index 2 IoT only, skip_trim = keep all indexes)
+        type: choice
+        required: true
+        default: 'trim_iot'
+        options:
+          - trim_iot
+          - skip_trim
+      image_format:
+        description: Install image format (esd = LZMS solid compression, wim = max LZX compression)
+        type: choice
+        required: true
+        default: 'esd'
+        options:
+          - esd
+          - wim
+
+jobs:
+  build-iso:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare D:\work directories and copy W10UI & scripts
+        shell: pwsh
+        run: |
+          $dirs = @(
+            "D:\work\updates",
+            "D:\work\temp",
+            "D:\work\mount",
+            "D:\work\mountre",
+            "D:\work\out",
+            "D:\work\W10UI",
+            "D:\work\scripts"
+          )
+          foreach ($d in $dirs) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+          }
+
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\W10UI\*" -Destination "D:\work\W10UI" -Recurse -Force
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\scripts\*" -Destination "D:\work\scripts" -Recurse -Force
+
+          if (-not (Test-Path "D:\work\W10UI\oscdimg.exe")) {
+            throw "oscdimg.exe not found in W10UI folder."
+          }
+
+          foreach ($reqFile in @("disable_telemetry.cmd", "Elevate_as_TI.ps1", "autounattend.xml")) {
+            if (-not (Test-Path "D:\work\scripts\$reqFile")) {
+              throw "$reqFile not found in scripts folder."
+            }
+          }
+
+          $iniPath = "D:\work\W10UI\W10UI.ini"
+          $ini = Get-Content $iniPath
+          $ini = $ini -replace '^Target\s*=.*', 'Target        =D:\work\iso'
+          $ini = $ini -replace '^ISO\s*=.*', 'ISO           =0'
+          Set-Content -Path $iniPath -Value $ini
+
+      - name: Download and verify base ISO + updates to D:\work
+        shell: pwsh
+        run: |
+          choco install aria2 -y --no-progress | Out-Null
+
+          $isoUrl = "${{ github.event.inputs.iso_url }}".Trim()
+          $isoPath = "D:\work\base.iso"
+          $expectedSha = "a0334f31ea7a3e6932b9ad7206608248f0bd40698bfb8fc65f14fc5e4976c160"
+          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          if ($isoUrl -match "^magnet:\?" -or $isoUrl -match "\.torrent(\?.*)?$") {
+            New-Item -ItemType Directory -Path "D:\work\torrent" -Force | Out-Null
+            aria2c --dir="D:\work\torrent" `
+              --seed-time=0 `
+              --file-allocation=none `
+              --bt-max-peers=100 `
+              --user-agent="$ua" `
+              --summary-interval=15 `
+              "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "Torrent/magnet download failed." }
+
+            $dlIso = Get-ChildItem -Path "D:\work\torrent" -Filter "*.iso" -Recurse | Sort-Object Length -Descending | Select-Object -First 1
+            if (-not $dlIso) { throw "No .iso found in torrent/magnet download." }
+            Move-Item -Path $dlIso.FullName -Destination $isoPath -Force
+            Remove-Item -Path "D:\work\torrent" -Recurse -Force -ErrorAction SilentlyContinue
+          } else {
+            $uri = [System.Uri]$isoUrl
+            aria2c --dir="D:\work" `
+              --out="base.iso" `
+              --file-allocation=none `
+              -x 16 -s 16 -k 1M `
+              --max-tries=5 `
+              --retry-wait=3 `
+              --user-agent="$ua" `
+              --referer="$($uri.Scheme)://$($uri.Host)/" `
+              --summary-interval=15 `
+              "$isoUrl"
+            if ($LASTEXITCODE -ne 0) { throw "ISO download failed." }
+          }
+
+          Write-Host "Verifying SHA-256 checksum of base.iso..."
+          $actualSha = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash.ToLower()
+          if ($actualSha -ne $expectedSha) {
+            throw "SHA-256 mismatch! Expected: $expectedSha | Actual: $actualSha"
+          }
+          Write-Host "SHA-256 verified: $actualSha"
+
+          $baseSizeGB = [math]::Round((Get-Item $isoPath).Length / 1GB, 3)
+          "BASE_ISO_SIZE_GB=$baseSizeGB" >> $env:GITHUB_ENV
+          "BASE_ISO_SHA256=$actualSha" >> $env:GITHUB_ENV
+
+          function Download-Update($url, $fallbackName) {
+            if (-not $url) { return }
+            $fileName = [System.IO.Path]::GetFileName(([System.Uri]$url).LocalPath)
+            if ($fileName -notmatch '\.(msu|cab|exe)$') { $fileName = $fallbackName }
+            $dest = Join-Path "D:\work\updates" $fileName
+            Write-Host "Downloading $fileName..."
+            curl.exe -L --fail --retry 3 -o "$dest" "$url"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to download $url" }
+          }
+
+          Download-Update "${{ github.event.inputs.lcu_url }}".Trim() "lcu_update.msu"
+          Download-Update "${{ github.event.inputs.dotnet_url }}".Trim() "dotnet_update.msu"
+
+      - name: Build Slipstreamed & Hardened ISO
+        shell: pwsh
+        run: |
+          function Compress-Image($sourceFile, $destFile, $compression) {
+            $info = dism.exe /English /Get-WimInfo /WimFile:"$sourceFile"
+            $indexes = ($info | Select-String -Pattern '^Index : (\d+)').Matches | ForEach-Object { $_.Groups[1].Value }
+            if (-not $indexes) { throw "Could not detect indexes in $sourceFile" }
+
+            if (Test-Path $destFile) { Remove-Item $destFile -Force }
+
+            foreach ($idx in $indexes) {
+              Write-Host "Exporting index $idx of $(Split-Path $sourceFile -Leaf) with /Compress:$compression..."
+              dism.exe /English /Export-Image /SourceImageFile:"$sourceFile" /SourceIndex:$idx /DestinationImageFile:"$destFile" /Compress:$compression /CheckIntegrity
+              if ($LASTEXITCODE -ne 0) { throw "DISM Export-Image failed for $sourceFile (Index $idx)." }
+            }
+          }
+
+          $selectedMode = "${{ github.event.inputs.trim_mode }}".Trim()
+          $imageFormat = "${{ github.event.inputs.image_format }}".Trim().ToLower()
+          $modes = @($selectedMode)
+          $results = @()
+
+          foreach ($mode in $modes) {
+            Write-Host "=========================================="
+            Write-Host "Starting Build Mode: $mode | Format: $imageFormat"
+            Write-Host "=========================================="
+
+            foreach ($dir in @("D:\work\iso", "D:\work\temp", "D:\work\mount", "D:\work\mountre")) {
+              if (Test-Path $dir) { Remove-Item -Path $dir -Recurse -Force }
+              New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+
+            7z x "D:\work\base.iso" -o"D:\work\iso" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "7z extraction failed ($mode)." }
+
+            # Delete base.iso on the final iteration to maximize free space on D:\
+            if ($mode -eq $modes[-1]) {
+              Remove-Item -Path "D:\work\base.iso" -Force -ErrorAction SilentlyContinue
+            }
+
+            Get-ChildItem -Path "D:\work\iso" -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReadOnly } | ForEach-Object {
+              $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+            }
+
+            $installWim = "D:\work\iso\sources\install.wim"
+            $bootWim = "D:\work\iso\sources\boot.wim"
+
+            if ($mode -eq "trim_iot") {
+              Write-Host "Trimming install.wim to Index 2 (IoT Enterprise LTSC)..."
+              dism.exe /English /Export-Image /SourceImageFile:"$installWim" /SourceIndex:2 /DestinationImageFile:"D:\work\install_iot.wim" /Compress:max /CheckIntegrity
+              if ($LASTEXITCODE -ne 0) { throw "DISM trim failed." }
+              Move-Item -Path "D:\work\install_iot.wim" -Destination $installWim -Force
+              $label = "Trim = TRUE (Index 2 IoT Only)"
+              $isoName = "Win10_IoT_LTSC_2021_x64.iso"
+            } else {
+              Write-Host "Skipping index trim (keeping all editions in install.wim)..."
+              $label = "Trim = FALSE (All Indexes)"
+              $isoName = "Win10_LTSC_2021_DualIndex_x64.iso"
+            }
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+            # 1. Slipstream LCU and .NET updates via W10UI
+            Push-Location "D:\work\W10UI"
+            cmd.exe /c "W10UI.cmd"
+            if ($LASTEXITCODE -ne 0) { throw "W10UI.cmd failed ($mode)." }
+            Pop-Location
+
+            # 2. Apply telemetry & hardening tweaks as TrustedInstaller
+            Write-Host "Running disable_telemetry.cmd as TrustedInstaller ($mode)..."
+            cmd.exe /c "D:\work\scripts\disable_telemetry.cmd $installWim"
+            if ($LASTEXITCODE -ne 0) {
+              throw "disable_telemetry.cmd failed ($mode) with exit code $LASTEXITCODE."
+            }
+
+            # 3. Copy autounattend.xml to ISO root
+            Copy-Item -Path "D:\work\scripts\autounattend.xml" -Destination "D:\work\iso\autounattend.xml" -Force
+
+            # 4. Compress install image (ESD or max WIM), max-compress boot.wim, and build ISO
+            if ($imageFormat -eq "esd") {
+              $finalInstallImage = "D:\work\iso\sources\install.esd"
+              Compress-Image $installWim $finalInstallImage "recovery"
+              Remove-Item -Path $installWim -Force
+            } else {
+              $finalInstallImage = $installWim
+              Compress-Image $installWim "D:\work\install_max.wim" "max"
+              Move-Item -Path "D:\work\install_max.wim" -Destination $installWim -Force
+            }
+
+            Compress-Image $bootWim "D:\work\boot_max.wim" "max"
+            Move-Item -Path "D:\work\boot_max.wim" -Destination $bootWim -Force
+
+            $finalIsoPath = "D:\work\out\$isoName"
+            $etfsboot = "D:\work\iso\boot\etfsboot.com"
+            $efisys = "D:\work\iso\efi\microsoft\boot\efisys.bin"
+
+            & "D:\work\W10UI\oscdimg.exe" -m -o -u2 -udfver102 "-bootdata:2#p0,e,b$etfsboot#pEF,e,b$efisys" "D:\work\iso" "$finalIsoPath"
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $finalIsoPath)) {
+              throw "oscdimg.exe failed ($mode)."
+            }
+            $sw.Stop()
+
+            $isoItem = Get-Item $finalIsoPath
+            $installSizeGB = [math]::Round((Get-Item $finalInstallImage).Length / 1GB, 3)
+            $bootSizeMB = [math]::Round((Get-Item $bootWim).Length / 1MB, 1)
+
+            $results += [PSCustomObject]@{
+              Mode       = $label
+              File       = $isoName
+              IsoGB      = [math]::Round($isoItem.Length / 1GB, 3)
+              IsoMiB     = [math]::Round($isoItem.Length / 1MB, 2)
+              InstallGB  = $installSizeGB
+              BootMB     = $bootSizeMB
+              Minutes    = [math]::Round($sw.Elapsed.TotalMinutes, 1)
+            }
+          }
+
+          "### Build Summary (Base ISO: $env:BASE_ISO_SIZE_GB GB | Format: $($imageFormat.ToUpper()) | SHA-256 Verified)" >> $env:GITHUB_STEP_SUMMARY
+          "| Mode | Output ISO | Final ISO Size | ``install.$imageFormat`` | ``boot.wim`` | Build Time |" >> $env:GITHUB_STEP_SUMMARY
+          "| :--- | :--- | :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($r in $results) {
+            "| $($r.Mode) | ``$($r.File)`` | **$($r.IsoGB) GB** ($($r.IsoMiB) MiB) | $($r.InstallGB) GB | $($r.BootMB) MB | $($r.Minutes) min |" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload ISO to Buzzheavier
+        shell: pwsh
+        run: |
+          $iso = Get-ChildItem -Path "D:\work\out" -Filter "*.iso" | Select-Object -First 1
+          if (-not $iso) { throw "No ISO found in D:\work\out to upload." }
+
+          $fileName = $iso.Name
+          $uploadUrl = "https://w.buzzheavier.com/$fileName"
+
+          Write-Host "Uploading $fileName to Buzzheavier..."
+          $response = curl.exe -s --fail --retry 3 -T "$($iso.FullName)" "$uploadUrl"
+          if ($LASTEXITCODE -ne 0) { throw "Buzzheavier upload failed." }
+
+          $json = $response | ConvertFrom-Json
+          $fileId = $json.data.id
+          if (-not $fileId) { throw "Could not parse file ID from Buzzheavier response: $response" }
+
+          $downloadLink = "https://buzzheavier.com/$fileId"
+          $sizeGB = [math]::Round($iso.Length / 1GB, 2)
+          Write-Host "SUCCESS! Download link: $downloadLink"
+
+          "### Updated Windows 10 IoT LTSC 2021 ISO Ready" >> $env:GITHUB_STEP_SUMMARY
+          "- **Filename:** ``$fileName``" >> $env:GITHUB_STEP_SUMMARY
+          "- **Size:** $sizeGB GB" >> $env:GITHUB_STEP_SUMMARY
+          "- **Download Link:** $downloadLink" >> $env:GITHUB_STEP_SUMMARY
