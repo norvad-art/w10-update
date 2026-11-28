@@ -1,4 +1,4 @@
-name: Test Slipstream Windows 10 IoT LTSC 2021
+name: Slipstream
 
 on:
   workflow_dispatch:
